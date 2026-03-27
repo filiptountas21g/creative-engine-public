@@ -104,10 +104,15 @@ IMPORTANT: Do NOT include any text in the prompt. The template system handles al
         raise
 
     # Step 5b: Generate the image
-    if model == "ideogram3" and config.IDEOGRAM_API_KEY:
-        return await _generate_ideogram(prompt, spec)
-    else:
+    # Prefer the model Opus chose, but fall back if API key is missing
+    if model == "flux2" and config.FAL_KEY:
         return await _generate_flux(prompt, negative, spec)
+    elif config.IDEOGRAM_API_KEY:
+        return await _generate_ideogram(prompt, spec)
+    elif config.FAL_KEY:
+        return await _generate_flux(prompt, negative, spec)
+    else:
+        raise ValueError("No image generation API key set (need FAL_KEY or IDEOGRAM_API_KEY)")
 
 
 async def _generate_flux(prompt: str, negative: str, spec: dict) -> ImageResult:
