@@ -32,6 +32,8 @@ from taste.drive_watcher import DriveWatcher
 from taste.template_builder import build_templates, format_templates_summary
 from pipeline.types import PipelineInput
 from pipeline.orchestrator import run_pipeline, format_result_for_telegram
+from pipeline.steps.render import render as render_post
+from pipeline.types import CreativeDecisions, ImageResult
 
 # ── Logging ────────────────────────────────────────────────
 logging.basicConfig(
@@ -53,6 +55,9 @@ _analysis_by_msg: dict[int, dict] = {}
 # Conversation history per user (last N messages for context)
 MAX_HISTORY = 15
 _chat_history: dict[int, list[dict]] = {}
+
+# Track last pipeline result per user for edits
+_last_post_by_user: dict[int, dict] = {}  # {decisions, image, client, result}
 
 
 def _add_to_history(user_id: int, role: str, content: str):
@@ -88,11 +93,13 @@ ROUTER_PROMPT = """You classify user messages for a creative design bot. The use
 Intents:
 1. "feedback" — user is responding to a taste analysis (confirming, correcting, directing). Examples: "correct", "σωστά", "love it", "remove the lime", "not this", "i like the colors but not the font", "more editorial".
 2. "taste" — user asks about their taste profile or what the system has learned. Examples: "what's my taste", "show me my preferences", "τι γούστο", "what have you learned about my style".
-3. "make" — user wants to generate/create a post, OR is asking for a variation/redo of a previous post. Examples: "make a post for Somamed", "generate something for LMW", "make a different one", "try again but more minimal", "φτιάξε ένα post".
-4. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
-5. "chat" — greeting, question, or anything else. Examples: "hey", "how does this work", "γεια".
+3. "make" — user wants to generate a completely NEW post from scratch. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post", "make a different one with a new concept".
+4. "edit" — user wants to TWEAK the last generated post (move things, change colors, change font, resize, switch template). The image stays the same, only the layout/styling changes. Examples: "move the text inside the picture", "make the headline bigger", "change the background to white", "use a different template", "swap the font", "put the text on the right side".
+5. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
+6. "chat" — greeting, question, or anything else. Examples: "hey", "how does this work", "γεια".
 
 Has recent analysis: {has_analysis}
+Has recent post: {has_post}
 
 Recent conversation:
 {history}
@@ -103,15 +110,20 @@ Return ONLY the intent word. Nothing else."""
 def _route_intent(text: str, has_analysis: bool, user_id: int = 0) -> str:
     """Quick Sonnet call to route intent."""
     history = _get_history_text(user_id) or "(no previous messages)"
+    has_post = user_id in _last_post_by_user
     try:
         response = _ai_client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=10,
-            system=ROUTER_PROMPT.format(has_analysis=has_analysis, history=history),
+            system=ROUTER_PROMPT.format(
+                has_analysis=has_analysis,
+                has_post=has_post,
+                history=history,
+            ),
             messages=[{"role": "user", "content": text}],
         )
         intent = response.content[0].text.strip().lower().split()[0]
-        if intent in ("feedback", "taste", "make", "templates", "chat"):
+        if intent in ("feedback", "taste", "make", "edit", "templates", "chat"):
             return intent
         return "feedback" if has_analysis else "chat"
     except Exception:
@@ -279,6 +291,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _handle_make(msg, text, user_id)
         return
 
+    # ── EDIT ──────────────────────────────────────────────
+    if intent == "edit":
+        if user_id in _last_post_by_user:
+            await _handle_edit(msg, text, user_id)
+        else:
+            await msg.reply_text("🤷 I don't have a recent post to edit. Make one first!")
+            _add_to_history(user_id, "assistant", "No recent post to edit.")
+        return
+
     # ── TEMPLATES ────────────────────────────────────────
     if intent == "templates":
         await _handle_templates(msg, text)
@@ -375,12 +396,150 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
         except Exception as e:
             logger.error(f"Failed to send image: {e}")
             await msg.reply_text(result_text, parse_mode="HTML")
+        # Store for edits
+        if result.decisions and result.hero_image:
+            _last_post_by_user[user_id] = {
+                "decisions": result.decisions,
+                "image": result.hero_image,
+                "client": client_name,
+            }
         # Track the result in conversation history
         _add_to_history(user_id, "assistant", result_text[:500])
     else:
         # Error messages may contain angle brackets from logs — don't use HTML parse
         await status_msg.edit_text(result_text)
         _add_to_history(user_id, "assistant", result_text[:300])
+
+
+EDIT_SYSTEM_PROMPT = """You edit the layout/styling of a social media post. You receive the current design decisions and a user request to change something.
+
+Your job: return ONLY the fields that need to change as a JSON object. Leave out anything that stays the same.
+
+Available fields you can change:
+- "template": one of "object-hero", "text-dominant", "split", "full-bleed"
+- "headline": the headline text
+- "subtext": the supporting text
+- "cta": call to action text
+- "font_headline": Google Font name (e.g. "Inter", "Space Grotesk", "Playfair Display")
+- "font_headline_weight": number (400, 500, 600, 700, 800, 900)
+- "font_headline_size": pixels (40-120)
+- "font_headline_tracking": CSS letter-spacing (e.g. "-0.02em", "0.05em")
+- "font_headline_case": "uppercase", "lowercase", "none"
+- "color_bg": hex color
+- "color_text": hex color
+- "color_accent": hex color
+- "color_subtext": hex color
+- "headline_margin_x": pixels from left edge (0-200)
+- "headline_margin_y": pixels from top/bottom (0-200)
+- "headline_max_width": CSS value (e.g. "75%", "90%", "50%")
+- "image_padding": pixels around image (0-200)
+
+Common requests and what to change:
+- "move text inside the picture" → template: "full-bleed" (text overlays on image)
+- "make headline bigger" → font_headline_size: increase by 15-20px
+- "change background to white" → color_bg: "#FFFFFF"
+- "more minimal" → increase image_padding, reduce font_headline_size
+- "put text on the right" → template: "split" with adjustments
+- "text over the image" → template: "full-bleed"
+
+Return ONLY valid JSON with the changes. No explanation."""
+
+
+async def _handle_edit(msg, text: str, user_id: int) -> None:
+    """Edit the last generated post by modifying decisions and re-rendering."""
+    post_data = _last_post_by_user[user_id]
+    decisions = post_data["decisions"]
+    image = post_data["image"]
+    client_name = post_data["client"]
+
+    status_msg = await msg.reply_text("✏️ Editing your post...")
+
+    # Build current state for Claude
+    current_state = {
+        "template": decisions.template,
+        "headline": decisions.headline,
+        "subtext": decisions.subtext,
+        "cta": decisions.cta,
+        "font_headline": decisions.font_headline,
+        "font_headline_weight": decisions.font_headline_weight,
+        "font_headline_size": decisions.font_headline_size,
+        "font_headline_tracking": decisions.font_headline_tracking,
+        "font_headline_case": decisions.font_headline_case,
+        "color_bg": decisions.color_bg,
+        "color_text": decisions.color_text,
+        "color_accent": decisions.color_accent,
+        "color_subtext": decisions.color_subtext,
+        "headline_margin_x": decisions.headline_margin_x,
+        "headline_margin_y": decisions.headline_margin_y,
+        "headline_max_width": decisions.headline_max_width,
+        "image_padding": decisions.image_padding,
+    }
+
+    try:
+        # Ask Claude what to change
+        response = await asyncio.to_thread(
+            _ai_client.messages.create,
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            system=EDIT_SYSTEM_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"Current design:\n{json.dumps(current_state, indent=2)}\n\nUser request: {text}",
+            }],
+        )
+
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+
+        changes = json.loads(raw)
+        logger.info(f"[edit] Changes: {changes}")
+
+        # Apply changes to a copy of decisions
+        from dataclasses import replace
+        new_decisions = replace(decisions, **{
+            k: v for k, v in changes.items()
+            if hasattr(decisions, k)
+        })
+
+        await status_msg.edit_text("✏️ Re-rendering with your changes...")
+
+        # Re-render with the same image but new decisions
+        render_result = await render_post(new_decisions, image, client_name)
+
+        # Build summary of what changed
+        change_descriptions = []
+        for key, val in changes.items():
+            if hasattr(decisions, key):
+                old_val = getattr(decisions, key)
+                if old_val != val:
+                    change_descriptions.append(f"  • {key}: {old_val} → {val}")
+
+        changes_text = "\n".join(change_descriptions) if change_descriptions else "  (minor adjustments)"
+        result_text = f"✅ Post edited for {client_name}\n\n✏️ Changes:\n{changes_text}"
+
+        # Send the edited image
+        img_path = Path(render_result.final_image_path)
+        await msg.reply_photo(
+            photo=open(img_path, "rb"),
+            caption=result_text[:1024],
+        )
+
+        # Update stored post for further edits
+        _last_post_by_user[user_id] = {
+            "decisions": new_decisions,
+            "image": image,
+            "client": client_name,
+        }
+        _add_to_history(user_id, "assistant", result_text[:300])
+
+    except Exception as e:
+        logger.error(f"Edit failed: {e}")
+        await status_msg.edit_text(f"❌ Edit failed: {str(e)[:200]}")
+        _add_to_history(user_id, "assistant", f"Edit failed: {str(e)[:100]}")
 
 
 async def _handle_templates(msg, text: str) -> None:

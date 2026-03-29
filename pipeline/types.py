@@ -104,4 +104,5 @@ class PipelineResult:
     concept: Optional[CreativeConcept] = None
     copy: Optional[CopyOptions] = None
     decisions: Optional[CreativeDecisions] = None
+    hero_image: Optional[ImageResult] = None
     error: str = ""

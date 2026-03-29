@@ -81,6 +81,8 @@ async def run_pipeline(
         image = await generate_image(concept, brain_ctx)
         await _notify("image", f"Image ready ({image.model_used})")
 
+        result.hero_image = image
+
         # Step 6: Creative Decisions (Opus)
         await _notify("decisions", "Opus is picking headline, font, colors...")
         decisions = await creative_decisions(input, concept, copy, image, brain_ctx)
