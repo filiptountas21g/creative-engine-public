@@ -42,9 +42,16 @@ def _inject_into_template(
     html = html.replace("{{CTA}}", decisions.cta)
     html = html.replace("{{CLIENT_NAME}}", client_name.upper())
 
-    # Image path — use absolute file:// URL for Playwright
+    # Image — embed as base64 data URI so it always loads in Playwright
     img_path = Path(image.image_path).resolve()
-    html = html.replace("{{IMAGE_PATH}}", f"file://{img_path}")
+    import base64
+    try:
+        img_bytes = img_path.read_bytes()
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+        img_src = f"data:image/png;base64,{img_b64}"
+    except Exception:
+        img_src = f"file://{img_path}"
+    html = html.replace("{{IMAGE_PATH}}", img_src)
 
     # Inject CSS variable overrides
     css_overrides = f"""

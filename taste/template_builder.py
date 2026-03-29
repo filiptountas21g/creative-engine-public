@@ -47,12 +47,17 @@ CSS variables the template MUST define in :root:
   --image-padding, --image-object-fit
   --client-color
 
-Placeholders to use in the HTML:
-  {{FONT_URL}} — Google Fonts <link> href
-  {{HEADLINE}} — main headline text
-  {{SUBTEXT}} — supporting text
-  {{IMAGE_PATH}} — path to hero image file
+Placeholders to use in the HTML (MANDATORY — the render engine replaces these):
+  {{FONT_URL}} — Google Fonts <link> href (use in: <link href="{{FONT_URL}}" rel="stylesheet">)
+  {{HEADLINE}} — main headline text (use in a heading element)
+  {{SUBTEXT}} — supporting text (use in a paragraph element)
+  {{IMAGE_PATH}} — path to hero image file (use in: <img src="{{IMAGE_PATH}}" ...> — MUST be an <img> tag, NOT a CSS background-image)
+  {{CTA}} — call to action text
   {{CLIENT_NAME}} — client name for footer label
+
+CRITICAL: Every template MUST include an <img src="{{IMAGE_PATH}}"> tag for the hero image.
+Do NOT use background-image CSS for the hero — it won't work with the render pipeline.
+The image should be styled with object-fit and proper sizing via CSS.
 
 Return ONLY the complete HTML file. No explanation, no markdown fences."""
 
@@ -176,6 +181,21 @@ Make it production-quality — this will be screenshotted by Playwright at 1080x
         if html.endswith("```"):
             html = html[:-3]
         html = html.strip()
+
+    # Validate required placeholders exist
+    required = ["{{HEADLINE}}", "{{IMAGE_PATH}}", "{{SUBTEXT}}", "{{CLIENT_NAME}}"]
+    missing = [p for p in required if p not in html]
+    if missing:
+        logger.warning(f"Template {category} missing placeholders: {missing} — patching...")
+        # If IMAGE_PATH is missing, try to add it
+        if "{{IMAGE_PATH}}" not in html:
+            # Find a good spot to inject the image
+            if "background-image" in html and "{{IMAGE_PATH}}" not in html:
+                # AI used CSS background-image — convert to img tag approach
+                html = html.replace("</body>", "")
+                html += '\n<img src="{{IMAGE_PATH}}" style="position:absolute;top:0;right:0;width:50%;height:100%;object-fit:cover;" alt="hero">\n</body>'
+            else:
+                html = html.replace("</body>", '<img src="{{IMAGE_PATH}}" style="position:absolute;top:0;right:0;width:50%;height:100%;object-fit:cover;" alt="hero">\n</body>')
 
     return html
 
