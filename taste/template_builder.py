@@ -208,27 +208,52 @@ def _extract_patterns(
             comp = data.get("composition", {})
             feel = data.get("feeling", {})
 
-            if typo.get("font_category"):
-                fonts.append(typo["font_category"])
-            if typo.get("estimated_weight"):
-                weights.append(str(typo["estimated_weight"]))
-            if typo.get("case"):
-                cases.append(typo["case"])
-            if typo.get("tracking"):
-                trackings.append(typo["tracking"])
+            # Typography: handle both list (new) and dict (old) format
+            typo_entries = typo if isinstance(typo, list) else [typo] if isinstance(typo, dict) else []
+            for t in typo_entries:
+                if not isinstance(t, dict):
+                    continue
+                if t.get("font_category"):
+                    fonts.append(t["font_category"])
+                if t.get("estimated_weight"):
+                    weights.append(str(t["estimated_weight"]))
+                if t.get("case"):
+                    cases.append(t["case"])
+                if t.get("tracking"):
+                    trackings.append(t["tracking"])
+
+            # Colors: handle both palette array (new) and flat keys (old) format
             if colors.get("temperature"):
                 temps.append(colors["temperature"])
-            bg = colors.get("background", {})
-            if bg.get("hex"):
-                bg_hexes.append(bg["hex"])
-            txt = colors.get("text_primary", {})
-            if txt.get("hex"):
-                text_hexes.append(txt["hex"])
-            acc = colors.get("accent", {})
-            if acc.get("hex"):
-                accent_hexes.append(acc["hex"])
             if colors.get("palette_mood"):
                 moods.append(colors["palette_mood"])
+
+            palette = colors.get("palette", [])
+            if palette:
+                # New format: palette is a list of {hex, name, usage}
+                for c in palette:
+                    usage = (c.get("usage") or "").lower()
+                    hex_val = c.get("hex", "")
+                    if not hex_val:
+                        continue
+                    if "background" in usage or "bg" in usage:
+                        bg_hexes.append(hex_val)
+                    elif "text" in usage or "headline" in usage or "body" in usage:
+                        text_hexes.append(hex_val)
+                    elif "accent" in usage or "highlight" in usage or "cta" in usage:
+                        accent_hexes.append(hex_val)
+            else:
+                # Old format: background/text_primary/accent dicts
+                bg = colors.get("background", {})
+                if isinstance(bg, dict) and bg.get("hex"):
+                    bg_hexes.append(bg["hex"])
+                txt = colors.get("text_primary", {})
+                if isinstance(txt, dict) and txt.get("hex"):
+                    text_hexes.append(txt["hex"])
+                acc = colors.get("accent", {})
+                if isinstance(acc, dict) and acc.get("hex"):
+                    accent_hexes.append(acc["hex"])
+
             if comp.get("negative_space_pct"):
                 neg_spaces.append(comp["negative_space_pct"])
             if comp.get("text_position"):
@@ -244,8 +269,11 @@ def _extract_patterns(
     for entry in confirmed_typo:
         try:
             data = json.loads(entry["content"])
-            if data.get("font_category"):
-                fonts.extend([data["font_category"]] * 2)
+            # Handle both list (new) and dict (old) format
+            typo_entries = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+            for t in typo_entries:
+                if isinstance(t, dict) and t.get("font_category"):
+                    fonts.extend([t["font_category"]] * 2)
         except (json.JSONDecodeError, KeyError):
             continue
 
@@ -294,5 +322,5 @@ def format_templates_summary(results: dict[str, Path]) -> str:
     for name, path in results.items():
         size_kb = path.stat().st_size / 1024
         lines.append(f"  • <b>{name}</b> — {size_kb:.1f} KB")
-    lines.append(f"\nGenerated from your taste data. Use /make to test them.")
+    lines.append(f"\nGenerated from your taste data. Say 'make a post for [client]' to test them.")
     return "\n".join(lines)
