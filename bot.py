@@ -1,9 +1,9 @@
 """
 Lectus Creative Engine — Telegram Bot
 
-Two modes:
-  1. TASTE: Send photos → AI breaks them down → stores in Big Brain → you direct
-  2. GENERATE: /make command → full pipeline → returns PNG
+No commands. Just talk naturally.
+Send photos → AI learns your taste.
+Ask for anything → Claude routes it.
 """
 
 import asyncio
@@ -22,6 +22,7 @@ from telegram.ext import (
     filters,
 )
 
+import anthropic
 import config
 from brain.client import Brain
 from taste.vision import analyze_inspiration, format_analysis_for_telegram
@@ -43,39 +44,66 @@ logger = logging.getLogger(__name__)
 # ── Global state ──────────────────────────────────────────
 brain = Brain(url=config.TURSO_DATABASE_URL, auth_token=config.TURSO_AUTH_TOKEN)
 drive_watcher = DriveWatcher(brain)
+_ai_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
-# Track analyses for feedback (message_id → analysis dict)
+# Track analyses for feedback
+_last_analysis_by_user: dict[int, dict] = {}
 _analysis_by_msg: dict[int, dict] = {}
-# Track which message a user is replying to
-_photo_msg_to_analysis: dict[int, dict] = {}
+
+
+# ── Intent Router ─────────────────────────────────────────
+
+ROUTER_PROMPT = """You classify user messages for a creative design bot. The user feeds inspiration images and generates social media posts.
+
+Intents:
+1. "feedback" — user is responding to a taste analysis (confirming, correcting, directing). Examples: "correct", "σωστά", "love it", "remove the lime", "not this", "i like the colors but not the font", "more editorial".
+2. "taste" — user asks about their taste profile or what the system has learned. Examples: "what's my taste", "show me my preferences", "τι γούστο", "what have you learned about my style".
+3. "make" — user wants to generate/create a post. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post".
+4. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
+5. "chat" — greeting, question, or anything else. Examples: "hey", "how does this work", "γεια".
+
+Has recent analysis: {has_analysis}
+
+Return ONLY the intent word. Nothing else."""
+
+
+def _route_intent(text: str, has_analysis: bool) -> str:
+    """Quick Sonnet call to route intent."""
+    try:
+        response = _ai_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=10,
+            system=ROUTER_PROMPT.format(has_analysis=has_analysis),
+            messages=[{"role": "user", "content": text}],
+        )
+        intent = response.content[0].text.strip().lower().split()[0]
+        if intent in ("feedback", "taste", "make", "templates", "chat"):
+            return intent
+        return "feedback" if has_analysis else "chat"
+    except Exception:
+        return "feedback" if has_analysis else "chat"
 
 
 # ── Photo handler (taste ingestion) ──────────────────────
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming photos — analyze with Claude Vision and respond."""
+    """Handle incoming photos — analyze with Claude Vision."""
     msg = update.message
     if not msg or not msg.photo:
         return
 
-    # Get the highest resolution photo
     photo = msg.photo[-1]
     caption = msg.caption or ""
 
-    # Send "analyzing..." message
     status_msg = await msg.reply_text("🔍 Analyzing this image...")
 
     try:
-        # Download photo to temp file
         file = await photo.get_file()
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         await file.download_to_drive(str(tmp_path))
 
-        # Run Claude Vision analysis
         analysis = await analyze_inspiration(tmp_path, context=caption)
 
-        # Store in Big Brain
-        # Check if caption mentions a client
         client = _extract_client_from_caption(caption)
 
         brain.store(
@@ -90,23 +118,45 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             tags=["telegram", analysis.get("composition", {}).get("template_match", "unknown")],
         )
 
-        # Delete status message
         await status_msg.delete()
 
-        # Send analysis
         analysis_text = format_analysis_for_telegram(analysis)
         if client:
             analysis_text = f"🏷️ Tagged for: <b>{client}</b>\n\n" + analysis_text
 
-        reply = await msg.reply_text(analysis_text, parse_mode="HTML")
+        # Send in chunks if too long for Telegram (4096 char limit)
+        reply = None
+        if len(analysis_text) <= 4000:
+            reply = await msg.reply_text(analysis_text, parse_mode="HTML")
+        else:
+            # Split at double newlines
+            chunks = []
+            remaining = analysis_text
+            while remaining:
+                if len(remaining) <= 4000:
+                    chunks.append(remaining)
+                    break
+                split_at = remaining.rfind("\n\n", 0, 4000)
+                if split_at == -1:
+                    split_at = remaining.rfind("\n", 0, 4000)
+                if split_at == -1:
+                    split_at = 4000
+                chunks.append(remaining[:split_at])
+                remaining = remaining[split_at:].strip()
 
-        # Track for feedback
-        _analysis_by_msg[reply.message_id] = analysis
-        _photo_msg_to_analysis[msg.message_id] = analysis
+            for chunk in chunks:
+                reply = await msg.reply_text(chunk, parse_mode="HTML")
+
+        if reply:
+            _analysis_by_msg[reply.message_id] = analysis
+        _last_analysis_by_user[msg.from_user.id] = analysis
 
     except Exception as e:
         logger.error(f"Photo analysis failed: {e}")
-        await status_msg.edit_text(f"❌ Analysis failed: {str(e)[:200]}")
+        try:
+            await msg.reply_text(f"❌ Analysis failed: {str(e)[:200]}")
+        except Exception:
+            pass
     finally:
         try:
             tmp_path.unlink()
@@ -115,14 +165,9 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def _extract_client_from_caption(caption: str) -> str | None:
-    """Try to extract a client name from the photo caption."""
     if not caption:
         return None
-
     lower = caption.lower()
-
-    # Patterns: "for Somamed", "this is for Somamed", "Somamed"
-    # Check against known clients
     try:
         clients = brain.get_clients(active_only=True)
         for c in clients:
@@ -131,230 +176,207 @@ def _extract_client_from_caption(caption: str) -> str | None:
                 return name
     except Exception:
         pass
-
-    # Pattern: "for <word>"
     import re
     match = re.search(r'\bfor\s+(\w+)', caption, re.IGNORECASE)
     if match:
         return match.group(1).title()
-
     return None
 
 
-# ── Text handler (feedback on analyses) ──────────────────
+# ── Text handler (Claude routes everything) ──────────────
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle text replies to analyses — parse feedback."""
     msg = update.message
     if not msg or not msg.text:
         return
 
-    # Check if this is a reply to an analysis
+    text = msg.text.strip()
+    user_id = msg.from_user.id if msg.from_user else 0
+
+    # Check if replying to an analysis
+    original_analysis = None
     if msg.reply_to_message and msg.reply_to_message.message_id in _analysis_by_msg:
         original_analysis = _analysis_by_msg[msg.reply_to_message.message_id]
+    elif user_id in _last_analysis_by_user:
+        original_analysis = _last_analysis_by_user[user_id]
 
+    has_analysis = original_analysis is not None
+
+    # Route intent
+    intent = await asyncio.to_thread(_route_intent, text, has_analysis)
+    logger.info(f"[router] intent={intent} for: {text[:80]}")
+
+    # ── FEEDBACK ─────────────────────────────────────────
+    if intent == "feedback" and original_analysis:
         status_msg = await msg.reply_text("📝 Processing your feedback...")
-
         try:
             feedback = await parse_feedback(
-                user_message=msg.text,
+                user_message=text,
                 original_analysis=original_analysis,
                 brain=brain,
             )
-
             await status_msg.edit_text(format_feedback_response(feedback))
-
+            if user_id in _last_analysis_by_user:
+                del _last_analysis_by_user[user_id]
         except Exception as e:
-            logger.error(f"Feedback processing failed: {e}")
-            await status_msg.edit_text(f"❌ Failed to process feedback: {str(e)[:200]}")
+            logger.error(f"Feedback failed: {e}")
+            await status_msg.edit_text(f"❌ Failed: {str(e)[:200]}")
         return
 
-    # Not a reply to an analysis — ignore or handle other text
-    # (Could be a general chat message)
-
-
-# ── /taste command ────────────────────────────────────────
-async def taste_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show taste summary. Usage: /taste [fonts|colors|composition|<client>]"""
-    args = context.args
-    aspect = None
-    client_filter = None
-
-    if args:
-        arg = args[0].lower()
-        if arg in ("fonts", "font", "typography"):
-            aspect = "fonts"
-        elif arg in ("colors", "colour", "color", "palette"):
-            aspect = "colors"
-        elif arg in ("composition", "layout", "layouts"):
-            aspect = "composition"
-        else:
-            # Assume it's a client name
-            client_filter = args[0]
-
-    summary = await get_taste_summary(brain, aspect=aspect)
-
-    # If client-specific, add client info
-    if client_filter:
-        from taste.memory import get_taste_context
-        ctx = await get_taste_context(brain, client=client_filter)
-        client_data = ctx.get("client_specific", {}).get(client_filter)
-        if client_data:
-            summary += f"\n\n🏷️ <b>{client_filter}:</b>\n{client_data}"
-        else:
-            summary += f"\n\nNo specific taste data for {client_filter} yet."
-
-    await update.message.reply_text(summary, parse_mode="HTML")
-
-
-# ── /make command (generation pipeline) ───────────────────
-async def make_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generate a post. Usage: /make <client> <brief>"""
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage: /make <client> <brief>\n"
-            "Example: /make Somamed launching new anti-aging treatment"
-        )
+    # ── TASTE ────────────────────────────────────────────
+    if intent == "taste":
+        try:
+            summary = await get_taste_summary(brain)
+            await msg.reply_text(summary, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Taste summary failed: {e}")
+            await msg.reply_text(f"❌ Failed: {str(e)[:200]}")
         return
 
-    client = context.args[0]
-    brief = " ".join(context.args[1:])
+    # ── MAKE ─────────────────────────────────────────────
+    if intent == "make":
+        await _handle_make(msg, text)
+        return
 
-    # Check for --template flag
-    template_override = None
-    if "--template" in brief:
-        parts = brief.split("--template")
-        brief = parts[0].strip()
-        if len(parts) > 1:
-            template_override = parts[1].strip().split()[0] if parts[1].strip() else None
+    # ── TEMPLATES ────────────────────────────────────────
+    if intent == "templates":
+        await _handle_templates(msg, text)
+        return
 
-    status_msg = await update.message.reply_text(
-        f"🎨 Generating post for <b>{client}</b>...\n"
-        f"Brief: {brief}\n\n"
-        f"⏳ This takes 60-120 seconds. I'll update you on progress.",
-        parse_mode="HTML",
+    # ── CHAT (default) ───────────────────────────────────
+    await msg.reply_text(
+        "🎨 Lectus Creative Engine\n\n"
+        "📸 Στείλε μου φωτογραφίες → μαθαίνω το γούστο σου\n"
+        "💬 Πες μου αν συμφωνείς → επιβεβαιώνω τις προτιμήσεις\n"
+        "🎯 'Φτιάξε post για Somamed' → δημιουργώ\n"
+        "🎨 'Τι γούστο έχω;' → σου δείχνω\n"
+        "📐 'Rebuild templates' → ξαναφτιάχνω templates"
     )
 
-    # Progress callback
-    async def on_progress(step: str, msg: str):
+
+async def _handle_make(msg, text: str) -> None:
+    """Parse natural language make request and run pipeline."""
+    # Use Sonnet to extract client + brief from natural text
+    try:
+        response = _ai_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            system=(
+                "Extract the client name and brief from a post generation request. "
+                "Return JSON: {\"client\": \"name\", \"brief\": \"the brief\", \"platform\": \"linkedin/instagram/facebook\"}\n"
+                "If no platform specified, default to linkedin. If no client specified, use \"ALL\"."
+            ),
+            messages=[{"role": "user", "content": text}],
+        )
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+        params = json.loads(raw)
+    except Exception:
+        params = {"client": "ALL", "brief": text, "platform": "linkedin"}
+
+    client_name = params.get("client", "ALL")
+    brief = params.get("brief", text)
+    platform = params.get("platform", "linkedin")
+
+    status_msg = await msg.reply_text(
+        f"🎨 Generating post for {client_name}...\n"
+        f"Brief: {brief}\n\n"
+        f"⏳ This takes 60-120 seconds.",
+    )
+
+    async def on_progress(step: str, progress_msg: str):
         try:
-            step_emojis = {
+            emojis = {
                 "research": "🔍", "brain": "🧠", "concept": "💡",
                 "copy": "📝", "image": "🖼️", "decisions": "🎯",
                 "render": "🖨️", "brain_write": "💾",
             }
-            emoji = step_emojis.get(step, "⏳")
+            emoji = emojis.get(step, "⏳")
             await status_msg.edit_text(
-                f"🎨 Generating post for <b>{client}</b>...\n\n"
-                f"{emoji} {msg}",
-                parse_mode="HTML",
+                f"🎨 Generating for {client_name}...\n\n{emoji} {progress_msg}",
             )
         except Exception:
-            pass  # Telegram edit rate limits
+            pass
 
-    # Run pipeline
     pipeline_input = PipelineInput(
-        client=client,
+        client=client_name,
         brief=brief,
-        platform="linkedin",
-        template_override=template_override,
+        platform=platform,
     )
 
     result = await run_pipeline(pipeline_input, brain, on_progress=on_progress)
-
-    # Send result
     result_text = format_result_for_telegram(result, pipeline_input)
 
     if result.success and result.image_path:
         try:
-            from pathlib import Path
             img_path = Path(result.image_path)
-            await update.message.reply_photo(
+            await msg.reply_photo(
                 photo=open(img_path, "rb"),
                 caption=result_text[:1024],
                 parse_mode="HTML",
             )
             if len(result_text) > 1024:
-                await update.message.reply_text(
-                    result_text[1024:], parse_mode="HTML"
-                )
+                await msg.reply_text(result_text[1024:], parse_mode="HTML")
         except Exception as e:
-            logger.error(f"Failed to send generated image: {e}")
-            await update.message.reply_text(result_text, parse_mode="HTML")
+            logger.error(f"Failed to send image: {e}")
+            await msg.reply_text(result_text, parse_mode="HTML")
     else:
-        await status_msg.edit_text(result_text, parse_mode="HTML")
+        # Error messages may contain angle brackets from logs — don't use HTML parse
+        await status_msg.edit_text(result_text)
 
 
-# ── /forget command ───────────────────────────────────────
-async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove a taste reference. Usage: /forget <id>"""
-    # TODO: Implement deletion by ID
-    await update.message.reply_text(
-        "🗑️ /forget is not yet implemented. "
-        "Use /taste to review your preferences."
-    )
+async def _handle_templates(msg, text: str) -> None:
+    """Handle template requests — show or rebuild."""
+    lower = text.lower()
+    rebuild_words = ("rebuild", "regenerate", "ξαναφτιάξε", "ξαναχτισε", "rebuild")
 
-
-# ── /templates command ────────────────────────────────────
-async def templates_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show current templates."""
-    templates_dir = Path(config.TEMPLATES_DIR)
-    if not templates_dir.exists() or not list(templates_dir.glob("*.html")):
-        await update.message.reply_text(
-            "📐 No templates generated yet.\n"
-            "Feed 10+ inspiration images first, then use /rebuild-templates."
+    if any(w in lower for w in rebuild_words):
+        status_msg = await msg.reply_text(
+            "🔄 Rebuilding templates from your taste data...\n"
+            "This takes about 30-60 seconds."
         )
-        return
-
-    template_files = sorted(templates_dir.glob("*.html"))
-    lines = ["📐 <b>Current Templates</b>\n"]
-    for t in template_files:
-        lines.append(f"  • {t.stem}")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-
-# ── /rebuild-templates command ────────────────────────────
-async def rebuild_templates_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Regenerate HTML templates from taste data."""
-    status_msg = await update.message.reply_text(
-        "🔄 Rebuilding templates from your taste data...\n"
-        "This takes about 30-60 seconds (4 templates to generate)."
-    )
-
-    try:
-        results = await build_templates(brain)
-        summary = format_templates_summary(results)
-        await status_msg.edit_text(summary, parse_mode="HTML")
-    except ValueError as e:
-        await status_msg.edit_text(f"⚠️ {str(e)}")
-    except Exception as e:
-        logger.error(f"Template rebuild failed: {e}")
-        await status_msg.edit_text(f"❌ Template rebuild failed: {str(e)[:200]}")
+        try:
+            results = await build_templates(brain)
+            summary = format_templates_summary(results)
+            await status_msg.edit_text(summary, parse_mode="HTML")
+        except ValueError as e:
+            await status_msg.edit_text(f"⚠️ {str(e)}")
+        except Exception as e:
+            logger.error(f"Template rebuild failed: {e}")
+            await status_msg.edit_text(f"❌ Failed: {str(e)[:200]}")
+    else:
+        templates_dir = Path(config.TEMPLATES_DIR)
+        if not templates_dir.exists() or not list(templates_dir.glob("*.html")):
+            await msg.reply_text(
+                "📐 No templates yet. Feed 10+ inspiration images first, "
+                "then say 'rebuild templates'."
+            )
+            return
+        template_files = sorted(templates_dir.glob("*.html"))
+        lines = ["📐 Current Templates\n"]
+        for t in template_files:
+            lines.append(f"  • {t.stem}")
+        await msg.reply_text("\n".join(lines))
 
 
-# ── /start command ────────────────────────────────────────
+# ── /start command (keep this one) ───────────────────────
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Welcome message."""
     await update.message.reply_text(
-        "🎨 <b>Lectus Creative Engine</b>\n\n"
-        "I learn your design taste and generate on-brand social media posts.\n\n"
-        "<b>Teach me your taste:</b>\n"
-        "  📸 Send a photo → I'll break it down\n"
-        "  💬 Reply to my analysis → confirm, correct, or direct\n"
-        "  📁 Drop images in Drive → I'll process them\n\n"
-        "<b>Commands:</b>\n"
-        "  /taste — see your taste profile\n"
-        "  /taste fonts — typography preferences\n"
-        "  /taste colors — color preferences\n"
-        "  /make <client> <brief> — generate a post\n"
-        "  /templates — see current templates\n"
-        "  /rebuild-templates — regenerate templates from taste\n",
-        parse_mode="HTML",
+        "🎨 Lectus Creative Engine\n\n"
+        "Just talk to me naturally:\n"
+        "📸 Send photos → I learn your design taste\n"
+        "💬 Reply → confirm, correct, or direct\n"
+        "🎯 'Make a post for Somamed about X' → I generate it\n"
+        "🎨 'What's my taste?' → I show you\n"
+        "📐 'Rebuild templates' → I regenerate from your taste"
     )
 
 
 # ── Drive watcher scheduler ──────────────────────────────
 async def _drive_poll_job():
-    """Scheduled job: poll Drive for new images."""
     try:
         count = await drive_watcher.poll_once()
         if count > 0:
@@ -368,24 +390,17 @@ async def _drive_poll_job():
 def main():
     logger.info("Starting Lectus Creative Engine...")
 
-    # Build Telegram app
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-    # Register handlers
+    # Only /start — everything else is natural language
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("taste", taste_command))
-    app.add_handler(CommandHandler("make", make_command))
-    app.add_handler(CommandHandler("forget", forget_command))
-    app.add_handler(CommandHandler("templates", templates_command))
-    app.add_handler(CommandHandler("rebuild_templates", rebuild_templates_command))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # Set up Drive watcher with bot reference
+    # Drive watcher
     drive_watcher.bot = app.bot
     drive_watcher.load_seen_ids()
 
-    # Schedule Drive polling
     if config.DRIVE_INSPIRATION_FOLDER_ID:
         scheduler = AsyncIOScheduler()
         scheduler.add_job(
@@ -398,7 +413,7 @@ def main():
         scheduler.start()
         logger.info(f"Drive watcher active — polling every {config.DRIVE_WATCH_INTERVAL}s")
     else:
-        logger.info("No DRIVE_INSPIRATION_FOLDER_ID set — Drive watcher disabled")
+        logger.info("No DRIVE_INSPIRATION_FOLDER_ID — Drive watcher disabled")
 
     logger.info("Bot ready. Polling for Telegram updates...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
