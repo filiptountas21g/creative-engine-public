@@ -31,7 +31,7 @@ from taste.memory import get_taste_summary
 from taste.drive_watcher import DriveWatcher
 from taste.template_builder import build_templates, format_templates_summary, load_templates_from_brain
 from pipeline.types import PipelineInput
-from pipeline.orchestrator import run_pipeline, format_result_for_telegram
+from pipeline.orchestrator import run_pipeline, run_carousel, format_result_for_telegram
 from pipeline.steps.render import render as render_post
 from pipeline.steps.dynamic_template import save_liked_template, save_client_preference, get_client_preferences
 from pipeline.types import CreativeDecisions, ImageResult
@@ -97,7 +97,8 @@ ROUTER_PROMPT = """You classify user messages for a creative design bot. The use
 Intents:
 1. "feedback" — user is responding to a taste analysis (confirming, correcting, directing). Examples: "correct", "σωστά", "remove the lime", "not this", "i like the colors but not the font", "more editorial".
 2. "taste" — user asks about their taste profile or what the system has learned. Examples: "what's my taste", "show me my preferences", "τι γούστο", "what have you learned about my style".
-3. "make" — user wants to generate a completely NEW post from scratch. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post", "make a different one with a new concept".
+3. "make" — user wants to generate a single NEW post from scratch. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post", "make a different one with a new concept".
+3b. "carousel" — user wants MULTIPLE posts with a cohesive look. Examples: "make a carousel of 6 posts for LMW", "create 4 posts same style", "make 6 slides for georgoulis", "do a series of posts".
 4. "edit" — user wants to TWEAK the last generated post (move things, change colors, change font, resize, switch template). The image stays the same, only the layout/styling changes. Examples: "move the text inside the picture", "make the headline bigger", "change the background to white", "use a different template", "swap the font", "put the text on the right side".
 5. "like" — user approves/loves the last generated post. May ALSO ask for a new one in the same message. Examples: "I love this", "this is great", "perfect", "i really like it", "αυτό μου αρέσει", "i love it can you make me another one". If the message ONLY expresses approval with no request for a new post, return "like". If it ALSO asks for a new post, return "like_and_make".
 6. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
@@ -128,7 +129,7 @@ def _route_intent(text: str, has_analysis: bool, user_id: int = 0) -> str:
             messages=[{"role": "user", "content": text}],
         )
         intent = response.content[0].text.strip().lower().replace(" ", "_").split()[0]
-        if intent in ("feedback", "taste", "make", "edit", "like", "like_and_make", "templates", "chat"):
+        if intent in ("feedback", "taste", "make", "carousel", "edit", "like", "like_and_make", "templates", "chat"):
             return intent
         return "feedback" if has_analysis else "chat"
     except Exception:
@@ -296,6 +297,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _handle_make(msg, text, user_id)
         return
 
+    # ── CAROUSEL ───────────────────────────────────────────
+    if intent == "carousel":
+        await _handle_carousel(msg, text, user_id)
+        return
+
     # ── LIKE / LIKE_AND_MAKE ──────────────────────────────
     if intent in ("like", "like_and_make"):
         if user_id in _last_post_by_user:
@@ -411,6 +417,128 @@ async def _extract_like_details(text: str, last_post: dict) -> tuple[dict | None
     except Exception as e:
         logger.warning(f"Could not extract like details: {e}")
         return None, None
+
+
+async def _handle_carousel(msg, text: str, user_id: int = 0) -> None:
+    """Parse carousel request and generate multiple cohesive posts."""
+    history = _get_history_text(user_id)
+
+    # Use Sonnet to extract client, brief, and count
+    try:
+        response = _ai_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=200,
+            system=(
+                "Extract client name, brief, count, and platform from a carousel request.\n"
+                f"Recent conversation:\n{history}\n\n"
+                'Return JSON: {"client": "name", "brief": "theme/direction", "count": 6, "platform": "linkedin"}\n'
+                "Default count is 6 if not specified. Default platform is linkedin."
+            ),
+            messages=[{"role": "user", "content": text}],
+        )
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+        params = json.loads(raw)
+    except Exception:
+        params = {"client": "ALL", "brief": text, "count": 6, "platform": "linkedin"}
+
+    client_name = params.get("client", "ALL")
+    brief = params.get("brief", text)
+    count = min(params.get("count", 6), 10)  # cap at 10
+    platform = params.get("platform", "linkedin")
+
+    status_msg = await msg.reply_text(
+        f"🎠 Generating carousel of {count} posts for {client_name}...\n"
+        f"Theme: {brief}\n\n"
+        f"⏳ This takes {count * 45}-{count * 90} seconds. Same aesthetic, different concepts."
+    )
+
+    async def on_progress(step: str, progress_msg: str):
+        try:
+            emojis = {
+                "research": "🔍", "brain": "🧠", "concept": "💡",
+                "copy": "📝", "image": "🖼️", "decisions": "🎯",
+                "template": "📐", "render": "🖨️", "brain_write": "💾",
+                "carousel": "🎠",
+            }
+            emoji = emojis.get(step, "⏳")
+            await status_msg.edit_text(
+                f"🎠 Carousel for {client_name} ({count} posts)...\n\n{emoji} {progress_msg}",
+            )
+        except Exception:
+            pass
+
+    pipeline_input = PipelineInput(
+        client=client_name,
+        brief=brief,
+        platform=platform,
+    )
+
+    results = await run_carousel(pipeline_input, brain, count=count, on_progress=on_progress)
+
+    # Send all successful posts as album
+    from telegram import InputMediaPhoto
+    successful = [r for r in results if r.success and r.image_path]
+
+    if not successful:
+        await status_msg.edit_text("❌ Carousel generation failed. No posts were created.")
+        return
+
+    # Send as media group (album)
+    media = []
+    for i, r in enumerate(successful):
+        img_path = Path(r.image_path)
+        caption = ""
+        if i == 0:
+            # First image gets the summary caption
+            caption = f"🎠 Carousel for {client_name} ({len(successful)} posts)\n\nTheme: {brief}"
+        media.append(InputMediaPhoto(
+            media=open(img_path, "rb"),
+            caption=caption[:1024] if caption else None,
+        ))
+
+    try:
+        # Telegram allows max 10 photos in an album
+        await msg.reply_media_group(media=media)
+    except Exception as e:
+        logger.error(f"Failed to send album: {e}")
+        # Fallback: send individually
+        for r in successful:
+            try:
+                await msg.reply_photo(photo=open(Path(r.image_path), "rb"))
+            except Exception:
+                pass
+
+    # Send details summary
+    summary_lines = [f"🎠 <b>Carousel for {client_name}</b> — {len(successful)}/{count} posts\n"]
+    for i, r in enumerate(successful, 1):
+        if r.concept and r.decisions:
+            summary_lines.append(
+                f"<b>Slide {i}:</b> {r.decisions.headline}\n"
+                f"   <i>{r.concept.object[:60]}</i>"
+            )
+    summary = "\n".join(summary_lines)
+
+    try:
+        await msg.reply_text(summary, parse_mode="HTML")
+    except Exception:
+        await msg.reply_text(summary[:4000])
+
+    _add_to_history(user_id, "assistant", f"Generated carousel of {len(successful)} posts for {client_name}")
+
+    # Store last post for likes
+    if successful:
+        last = successful[-1]
+        if last.decisions and last.hero_image:
+            _last_post_by_user[user_id] = {
+                "decisions": last.decisions,
+                "image": last.hero_image,
+                "client": client_name,
+            }
 
 
 async def _handle_make(msg, text: str, user_id: int = 0) -> None:

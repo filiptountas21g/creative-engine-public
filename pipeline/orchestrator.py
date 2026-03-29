@@ -128,6 +128,177 @@ async def run_pipeline(
     return result
 
 
+async def run_carousel(
+    input: PipelineInput,
+    brain: Brain,
+    count: int = 6,
+    on_progress=None,
+) -> list[PipelineResult]:
+    """
+    Generate a carousel of cohesive posts.
+
+    The first post is generated normally. Posts 2-N reuse the same
+    design decisions (font, colors, template HTML) but get fresh
+    concepts, headlines, and images.
+    """
+    start = time.time()
+
+    async def _notify(step: str, msg: str):
+        logger.info(f"[carousel] [{step}] {msg}")
+        if on_progress:
+            try:
+                await on_progress(step, msg)
+            except Exception:
+                pass
+
+    results = []
+
+    # ── Shared setup (done once) ──────────────────────────
+    await _notify("research", "Researching trends...")
+    research_result = await research(input)
+
+    await _notify("brain", "Reading client profile + taste data...")
+    brain_ctx = await brain_read(input, brain)
+
+    client_prefs = get_client_preferences(brain, input.client)
+
+    # ── First post: full pipeline to establish the design ──
+    await _notify("carousel", f"Generating post 1/{count}...")
+    first = await _generate_carousel_slide(
+        input, research_result, brain_ctx, client_prefs, brain,
+        slide_num=1, total=count,
+        locked_decisions=None, locked_template_html=None,
+        on_progress=on_progress,
+    )
+    results.append(first)
+
+    if not first.success:
+        return results
+
+    # Lock the design from post 1
+    locked_decisions = first.decisions
+    # Generate the template HTML once and reuse
+    locked_html = await generate_dynamic_template(locked_decisions, brain)
+
+    # ── Posts 2-N: new concept + image, same design ──
+    for i in range(2, count + 1):
+        await _notify("carousel", f"Generating post {i}/{count}...")
+
+        # Modify brief to request a different concept
+        varied_input = PipelineInput(
+            client=input.client,
+            brief=f"{input.brief} — THIS IS POST {i} OF {count} IN A CAROUSEL. "
+                  f"Use a DIFFERENT visual concept from the previous slides. "
+                  f"Previous concepts: {', '.join(r.concept.object for r in results if r.concept)}",
+            platform=input.platform,
+        )
+
+        slide = await _generate_carousel_slide(
+            varied_input, research_result, brain_ctx, client_prefs, brain,
+            slide_num=i, total=count,
+            locked_decisions=locked_decisions, locked_template_html=locked_html,
+            on_progress=on_progress,
+        )
+        results.append(slide)
+
+    elapsed = time.time() - start
+    success_count = sum(1 for r in results if r.success)
+    logger.info(f"Carousel complete: {success_count}/{count} posts in {elapsed:.1f}s")
+
+    return results
+
+
+async def _generate_carousel_slide(
+    input: PipelineInput,
+    research_result,
+    brain_ctx,
+    client_prefs: dict | None,
+    brain: Brain,
+    slide_num: int,
+    total: int,
+    locked_decisions=None,
+    locked_template_html: str | None = None,
+    on_progress=None,
+) -> PipelineResult:
+    """Generate a single carousel slide."""
+    result = PipelineResult()
+
+    async def _notify(step: str, msg: str):
+        logger.info(f"[slide {slide_num}/{total}] [{step}] {msg}")
+        if on_progress:
+            try:
+                await on_progress(step, msg)
+            except Exception:
+                pass
+
+    try:
+        # Always generate fresh concept
+        concept = await creative_concept(input, research_result, brain_ctx)
+        result.concept = concept
+        await _notify("concept", f"Concept: {concept.object[:50]}")
+
+        # Always generate fresh copy
+        copy = await write_copy(input, concept, brain_ctx)
+        result.copy = copy
+
+        # Always generate fresh image
+        image = await generate_image(concept, brain_ctx)
+        result.hero_image = image
+        await _notify("image", f"Image ready ({image.model_used})")
+
+        if locked_decisions:
+            # Reuse design but pick best headline and new subtext/CTA
+            decisions = await creative_decisions(
+                input, concept, copy, image, brain_ctx,
+                client_preferences=client_prefs,
+            )
+            # Lock the design choices from slide 1
+            decisions.font_headline = locked_decisions.font_headline
+            decisions.font_headline_weight = locked_decisions.font_headline_weight
+            decisions.font_headline_size = locked_decisions.font_headline_size
+            decisions.font_headline_tracking = locked_decisions.font_headline_tracking
+            decisions.font_headline_line_height = locked_decisions.font_headline_line_height
+            decisions.font_headline_case = locked_decisions.font_headline_case
+            decisions.font_subtext = locked_decisions.font_subtext
+            decisions.font_subtext_weight = locked_decisions.font_subtext_weight
+            decisions.font_subtext_size = locked_decisions.font_subtext_size
+            decisions.color_bg = locked_decisions.color_bg
+            decisions.color_text = locked_decisions.color_text
+            decisions.color_accent = locked_decisions.color_accent
+            decisions.color_subtext = locked_decisions.color_subtext
+            decisions.template = locked_decisions.template
+        else:
+            # First slide: full decisions
+            decisions = await creative_decisions(
+                input, concept, copy, image, brain_ctx,
+                client_preferences=client_prefs,
+            )
+
+        result.decisions = decisions
+
+        # Render
+        if locked_template_html:
+            render_result = await render(decisions, image, input.client, dynamic_html=locked_template_html)
+        else:
+            dynamic_html = await generate_dynamic_template(decisions, brain)
+            render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html)
+
+        result.image_path = render_result.final_image_path
+        await _notify("render", f"Rendered slide {slide_num}")
+
+        # Store in brain
+        await brain_write(input, concept, copy, decisions, image, brain)
+
+        result.success = True
+
+    except Exception as e:
+        result.success = False
+        result.error = str(e)
+        logger.error(f"Slide {slide_num} failed: {e}")
+
+    return result
+
+
 def format_result_for_telegram(result: PipelineResult, input: PipelineInput) -> str:
     """Format pipeline result for Telegram message."""
     if not result.success:
