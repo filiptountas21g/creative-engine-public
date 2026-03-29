@@ -203,6 +203,21 @@ async def _poll_fal_result(client: httpx.AsyncClient, request_id: str, max_polls
 
 async def _generate_ideogram(prompt: str, spec: dict) -> ImageResult:
     """Generate image with Ideogram 3 API."""
+    # Convert aspect ratio from Opus format ("1:1") to Ideogram format ("ASPECT_1_1")
+    ASPECT_MAP = {
+        "1:1": "ASPECT_1_1",
+        "4:5": "ASPECT_4_5",
+        "5:4": "ASPECT_5_4",
+        "9:16": "ASPECT_9_16",
+        "16:9": "ASPECT_16_9",
+        "3:4": "ASPECT_3_4",
+        "4:3": "ASPECT_4_3",
+        "2:3": "ASPECT_2_3",
+        "3:2": "ASPECT_3_2",
+    }
+    raw_ratio = spec.get("aspect_ratio", "1:1")
+    aspect = ASPECT_MAP.get(raw_ratio, raw_ratio if raw_ratio.startswith("ASPECT_") else "ASPECT_1_1")
+
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
             "https://api.ideogram.ai/generate",
@@ -213,7 +228,7 @@ async def _generate_ideogram(prompt: str, spec: dict) -> ImageResult:
             json={
                 "image_request": {
                     "prompt": prompt,
-                    "aspect_ratio": spec.get("aspect_ratio", "ASPECT_1_1"),
+                    "aspect_ratio": aspect,
                     "model": "V_2",
                     "magic_prompt_option": "OFF",
                 },
