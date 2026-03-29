@@ -75,13 +75,21 @@ def _format_previous(previous: list[dict] | None) -> str:
     """Format previous decisions so Opus knows what to avoid repeating."""
     if not previous:
         return ""
-    lines = ["PREVIOUS POSTS IN THIS SESSION (DO NOT repeat the same template+font+color combo):"]
-    for i, p in enumerate(previous[-3:], 1):  # last 3 posts
-        lines.append(
-            f"  Post {i}: template={p.get('template')}, font={p.get('font')}, "
-            f"colors=bg:{p.get('color_bg')} text:{p.get('color_text')} accent:{p.get('color_accent')}"
-        )
-    lines.append("Pick a DIFFERENT template, font, or color approach this time.")
+    last = previous[-1]
+    banned_template = last.get("template", "split")
+    banned_font = last.get("font", "")
+    lines = [
+        "⚠️ MANDATORY VARIETY RULES:",
+        f"  DO NOT use template '{banned_template}' — it was used in the last post.",
+        f"  DO NOT use font '{banned_font}' — it was used in the last post.",
+        f"  You MUST pick a different template from: object-hero, text-dominant, split, full-bleed",
+        f"  (excluding '{banned_template}')",
+    ]
+    if len(previous) >= 2:
+        used_templates = set(p.get("template") for p in previous[-3:])
+        remaining = [t for t in ["object-hero", "text-dominant", "split", "full-bleed"] if t not in used_templates]
+        if remaining:
+            lines.append(f"  Suggested templates to try: {', '.join(remaining)}")
     return "\n".join(lines)
 
 
