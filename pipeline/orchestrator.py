@@ -26,6 +26,7 @@ async def run_pipeline(
     input: PipelineInput,
     brain: Brain,
     on_progress=None,
+    previous_decisions: list[dict] | None = None,
 ) -> PipelineResult:
     """
     Run the full creative generation pipeline.
@@ -85,7 +86,7 @@ async def run_pipeline(
 
         # Step 6: Creative Decisions (Opus)
         await _notify("decisions", "Opus is picking headline, font, colors...")
-        decisions = await creative_decisions(input, concept, copy, image, brain_ctx)
+        decisions = await creative_decisions(input, concept, copy, image, brain_ctx, previous_decisions)
         result.decisions = decisions
         await _notify("decisions", (
             f"Template: {decisions.template}, "

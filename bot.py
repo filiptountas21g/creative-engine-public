@@ -59,6 +59,9 @@ _chat_history: dict[int, list[dict]] = {}
 # Track last pipeline result per user for edits
 _last_post_by_user: dict[int, dict] = {}  # {decisions, image, client, result}
 
+# Track previous decisions per user for variety
+_previous_decisions: dict[int, list[dict]] = {}
+
 
 def _add_to_history(user_id: int, role: str, content: str):
     """Add a message to user's conversation history."""
@@ -380,7 +383,8 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
         platform=platform,
     )
 
-    result = await run_pipeline(pipeline_input, brain, on_progress=on_progress)
+    prev = _previous_decisions.get(user_id)
+    result = await run_pipeline(pipeline_input, brain, on_progress=on_progress, previous_decisions=prev)
     result_text = format_result_for_telegram(result, pipeline_input)
 
     if result.success and result.image_path:
@@ -396,13 +400,22 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
         except Exception as e:
             logger.error(f"Failed to send image: {e}")
             await msg.reply_text(result_text, parse_mode="HTML")
-        # Store for edits
+        # Store for edits + track for variety
         if result.decisions and result.hero_image:
             _last_post_by_user[user_id] = {
                 "decisions": result.decisions,
                 "image": result.hero_image,
                 "client": client_name,
             }
+            if user_id not in _previous_decisions:
+                _previous_decisions[user_id] = []
+            _previous_decisions[user_id].append({
+                "template": result.decisions.template,
+                "font": result.decisions.font_headline,
+                "color_bg": result.decisions.color_bg,
+                "color_text": result.decisions.color_text,
+                "color_accent": result.decisions.color_accent,
+            })
         # Track the result in conversation history
         _add_to_history(user_id, "assistant", result_text[:500])
     else:

@@ -34,11 +34,15 @@ For LATIN TEXT, you can use any Google Font including:
   Fraunces, Playfair Display, Space Grotesk, Syne, Instrument Serif,
   Plus Jakarta Sans, DM Serif Display, Cormorant, Spectral
 
-Available templates:
+Available templates (VARY your choice — don't always pick the same one):
   object-hero — hero image with text overlay (default for single objects)
   text-dominant — headline is the hero, minimal/no image
   split — text left, image right
   full-bleed — image fills canvas, text on strip
+
+IMPORTANT: If the brief mentions wanting something "different", "new style", or "another approach" —
+you MUST change the template, font, AND color scheme significantly from what was described.
+Don't keep picking the same template and font for every post. Be creative and vary your choices.
 
 Return ONLY valid JSON:
 {
@@ -67,12 +71,27 @@ Return ONLY valid JSON:
 }"""
 
 
+def _format_previous(previous: list[dict] | None) -> str:
+    """Format previous decisions so Opus knows what to avoid repeating."""
+    if not previous:
+        return ""
+    lines = ["PREVIOUS POSTS IN THIS SESSION (DO NOT repeat the same template+font+color combo):"]
+    for i, p in enumerate(previous[-3:], 1):  # last 3 posts
+        lines.append(
+            f"  Post {i}: template={p.get('template')}, font={p.get('font')}, "
+            f"colors=bg:{p.get('color_bg')} text:{p.get('color_text')} accent:{p.get('color_accent')}"
+        )
+    lines.append("Pick a DIFFERENT template, font, or color approach this time.")
+    return "\n".join(lines)
+
+
 async def creative_decisions(
     input: PipelineInput,
     concept: CreativeConcept,
     copy: CopyOptions,
     image: ImageResult,
     brain_ctx: BrainContext,
+    previous_decisions: list[dict] | None = None,
 ) -> CreativeDecisions:
     """
     Make all final creative decisions — headline, fonts, colors, layout.
@@ -113,6 +132,8 @@ TASTE PREFERENCES:
 Brand tone: {brain_ctx.brand.get('tone', 'professional')}
 
 {f'FORCED TEMPLATE: {input.template_override}' if input.template_override else ''}
+
+{_format_previous(previous_decisions)}
 
 Return only the JSON with all decisions."""
 
