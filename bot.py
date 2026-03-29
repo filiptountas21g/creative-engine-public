@@ -29,7 +29,7 @@ from taste.vision import analyze_inspiration, format_analysis_for_telegram
 from taste.feedback import parse_feedback, format_feedback_response
 from taste.memory import get_taste_summary
 from taste.drive_watcher import DriveWatcher
-from taste.template_builder import build_templates, format_templates_summary
+from taste.template_builder import build_templates, format_templates_summary, load_templates_from_brain
 from pipeline.types import PipelineInput
 from pipeline.orchestrator import run_pipeline, format_result_for_telegram
 from pipeline.steps.render import render as render_post
@@ -628,6 +628,13 @@ def main():
         logger.info(f"Drive watcher active — polling every {config.DRIVE_WATCH_INTERVAL}s")
     else:
         logger.info("No DRIVE_INSPIRATION_FOLDER_ID — Drive watcher disabled")
+
+    # Restore templates from Big Brain (survive container restarts)
+    restored = load_templates_from_brain(brain)
+    if restored > 0:
+        logger.info(f"Restored {restored} templates from Big Brain")
+    else:
+        logger.info("No templates in Brain yet — say 'rebuild templates' to generate them")
 
     logger.info("Bot ready. Polling for Telegram updates...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

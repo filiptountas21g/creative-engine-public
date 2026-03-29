@@ -99,10 +99,54 @@ async def build_templates(brain: Brain) -> dict[str, Path]:
         out_path = templates_dir / f"{category}.html"
         out_path.write_text(html, encoding="utf-8")
 
+        # Store in Big Brain so templates survive container restarts
+        brain.store(
+            topic="template_html",
+            source="template_builder",
+            content=html,
+            client="ALL",
+            summary=f"HTML template: {category}",
+            tags=["template", category],
+        )
+        logger.info(f"Saved template: {out_path} (+ stored in Brain)")
+
         results[category] = out_path
         logger.info(f"Saved template: {out_path}")
 
     return results
+
+
+def load_templates_from_brain(brain: Brain) -> int:
+    """
+    Load templates from Big Brain back to disk on startup.
+    Returns the number of templates restored.
+    """
+    templates_dir = Path(config.TEMPLATES_DIR)
+    templates_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get all template_html entries (most recent first)
+    rows = brain.query(topic="template_html", limit=20)
+    if not rows:
+        return 0
+
+    restored = 0
+    found = set()
+    for row in rows:
+        tags = row.get("tags") or []
+        summary = row.get("summary") or ""
+        for category in TEMPLATE_CATEGORIES:
+            if category in found:
+                continue
+            if category in tags or category in summary:
+                html = row.get("content", "")
+                if html and len(html) > 100:
+                    out_path = templates_dir / f"{category}.html"
+                    out_path.write_text(html, encoding="utf-8")
+                    restored += 1
+                    found.add(category)
+                    logger.info(f"Restored template from Brain: {category}")
+
+    return restored
 
 
 async def _generate_template(category: str, taste_summary: dict) -> str:
