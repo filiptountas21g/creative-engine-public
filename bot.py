@@ -461,7 +461,7 @@ async def _handle_carousel(msg, text: str, user_id: int = 0) -> None:
         try:
             emojis = {
                 "research": "🔍", "brain": "🧠", "concept": "💡",
-                "copy": "📝", "image": "🖼️", "decisions": "🎯",
+                "copy": "📝", "image": "📸", "decisions": "🎯",
                 "template": "📐", "render": "🖨️", "brain_write": "💾",
                 "carousel": "🎠",
             }
@@ -587,7 +587,7 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
         try:
             emojis = {
                 "research": "🔍", "brain": "🧠", "concept": "💡",
-                "copy": "📝", "image": "🖼️", "decisions": "🎯",
+                "copy": "📝", "image": "📸", "decisions": "🎯",
                 "template": "📐", "render": "🖨️", "brain_write": "💾",
             }
             emoji = emojis.get(step, "⏳")

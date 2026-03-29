@@ -8,6 +8,8 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 FAL_KEY = os.getenv("FAL_KEY", "")
 IDEOGRAM_API_KEY = os.getenv("IDEOGRAM_API_KEY", "")
+UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 
 # Model names
 OPUS_MODEL = os.getenv("OPUS_MODEL", "claude-opus-4-1-20250805")
