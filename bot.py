@@ -883,8 +883,16 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
 
         await status_msg.edit_text("✏️ Re-rendering with your changes...")
 
-        # Re-render with the same image but new decisions
-        render_result = await render_post(new_decisions, image, client_name)
+        # Fetch logo for this client
+        from pipeline.orchestrator import _get_client_logo
+        logo_b64 = _get_client_logo(brain, client_name)
+
+        # Re-generate dynamic template with logo awareness
+        from pipeline.steps.dynamic_template import generate_dynamic_template
+        dynamic_html = await generate_dynamic_template(new_decisions, brain, has_logo=logo_b64 is not None)
+
+        # Re-render with the same image but new decisions + logo
+        render_result = await render_post(new_decisions, image, client_name, dynamic_html=dynamic_html, logo_b64=logo_b64)
 
         # Build summary of what changed
         change_descriptions = []
