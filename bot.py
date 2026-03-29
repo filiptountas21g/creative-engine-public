@@ -50,6 +50,36 @@ _ai_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 _last_analysis_by_user: dict[int, dict] = {}
 _analysis_by_msg: dict[int, dict] = {}
 
+# Conversation history per user (last N messages for context)
+MAX_HISTORY = 15
+_chat_history: dict[int, list[dict]] = {}
+
+
+def _add_to_history(user_id: int, role: str, content: str):
+    """Add a message to user's conversation history."""
+    if user_id not in _chat_history:
+        _chat_history[user_id] = []
+    _chat_history[user_id].append({"role": role, "content": content})
+    # Keep only last N messages
+    if len(_chat_history[user_id]) > MAX_HISTORY:
+        _chat_history[user_id] = _chat_history[user_id][-MAX_HISTORY:]
+
+
+def _get_history_text(user_id: int) -> str:
+    """Get conversation history formatted for Claude context."""
+    history = _chat_history.get(user_id, [])
+    if not history:
+        return ""
+    lines = []
+    for msg in history:
+        prefix = "You" if msg["role"] == "user" else "Bot"
+        # Truncate long messages to save tokens
+        text = msg["content"][:300]
+        if len(msg["content"]) > 300:
+            text += "..."
+        lines.append(f"{prefix}: {text}")
+    return "\n".join(lines)
+
 
 # ── Intent Router ─────────────────────────────────────────
 
@@ -58,22 +88,26 @@ ROUTER_PROMPT = """You classify user messages for a creative design bot. The use
 Intents:
 1. "feedback" — user is responding to a taste analysis (confirming, correcting, directing). Examples: "correct", "σωστά", "love it", "remove the lime", "not this", "i like the colors but not the font", "more editorial".
 2. "taste" — user asks about their taste profile or what the system has learned. Examples: "what's my taste", "show me my preferences", "τι γούστο", "what have you learned about my style".
-3. "make" — user wants to generate/create a post. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post".
+3. "make" — user wants to generate/create a post, OR is asking for a variation/redo of a previous post. Examples: "make a post for Somamed", "generate something for LMW", "make a different one", "try again but more minimal", "φτιάξε ένα post".
 4. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
 5. "chat" — greeting, question, or anything else. Examples: "hey", "how does this work", "γεια".
 
 Has recent analysis: {has_analysis}
 
+Recent conversation:
+{history}
+
 Return ONLY the intent word. Nothing else."""
 
 
-def _route_intent(text: str, has_analysis: bool) -> str:
+def _route_intent(text: str, has_analysis: bool, user_id: int = 0) -> str:
     """Quick Sonnet call to route intent."""
+    history = _get_history_text(user_id) or "(no previous messages)"
     try:
         response = _ai_client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=10,
-            system=ROUTER_PROMPT.format(has_analysis=has_analysis),
+            system=ROUTER_PROMPT.format(has_analysis=has_analysis, history=history),
             messages=[{"role": "user", "content": text}],
         )
         intent = response.content[0].text.strip().lower().split()[0]
@@ -150,6 +184,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if reply:
             _analysis_by_msg[reply.message_id] = analysis
         _last_analysis_by_user[msg.from_user.id] = analysis
+        _add_to_history(msg.from_user.id, "user", "[sent inspiration photo]")
+        _add_to_history(msg.from_user.id, "assistant", f"[analyzed image: {analysis.get('feeling', {}).get('mood', '?')} mood, {analysis.get('composition', {}).get('template_match', '?')} layout]")
 
     except Exception as e:
         logger.error(f"Photo analysis failed: {e}")
@@ -201,8 +237,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     has_analysis = original_analysis is not None
 
+    # Track user message in history
+    _add_to_history(user_id, "user", text)
+
     # Route intent
-    intent = await asyncio.to_thread(_route_intent, text, has_analysis)
+    intent = await asyncio.to_thread(_route_intent, text, has_analysis, user_id)
     logger.info(f"[router] intent={intent} for: {text[:80]}")
 
     # ── FEEDBACK ─────────────────────────────────────────
@@ -214,7 +253,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 original_analysis=original_analysis,
                 brain=brain,
             )
-            await status_msg.edit_text(format_feedback_response(feedback))
+            response_text = format_feedback_response(feedback)
+            await status_msg.edit_text(response_text)
+            _add_to_history(user_id, "assistant", response_text)
             if user_id in _last_analysis_by_user:
                 del _last_analysis_by_user[user_id]
         except Exception as e:
@@ -227,6 +268,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try:
             summary = await get_taste_summary(brain)
             await msg.reply_text(summary, parse_mode="HTML")
+            _add_to_history(user_id, "assistant", summary[:300])
         except Exception as e:
             logger.error(f"Taste summary failed: {e}")
             await msg.reply_text(f"❌ Failed: {str(e)[:200]}")
@@ -234,7 +276,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # ── MAKE ─────────────────────────────────────────────
     if intent == "make":
-        await _handle_make(msg, text)
+        await _handle_make(msg, text, user_id)
         return
 
     # ── TEMPLATES ────────────────────────────────────────
@@ -243,7 +285,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     # ── CHAT (default) ───────────────────────────────────
-    await msg.reply_text(
+    bot_reply = (
         "🎨 Lectus Creative Engine\n\n"
         "📸 Στείλε μου φωτογραφίες → μαθαίνω το γούστο σου\n"
         "💬 Πες μου αν συμφωνείς → επιβεβαιώνω τις προτιμήσεις\n"
@@ -251,18 +293,28 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🎨 'Τι γούστο έχω;' → σου δείχνω\n"
         "📐 'Rebuild templates' → ξαναφτιάχνω templates"
     )
+    await msg.reply_text(bot_reply)
+    _add_to_history(user_id, "assistant", bot_reply)
 
 
-async def _handle_make(msg, text: str) -> None:
+async def _handle_make(msg, text: str, user_id: int = 0) -> None:
     """Parse natural language make request and run pipeline."""
-    # Use Sonnet to extract client + brief from natural text
+    # Get conversation history for context
+    history = _get_history_text(user_id)
+
+    # Use Sonnet to extract client + brief from natural text (with conversation context)
     try:
         response = _ai_client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=100,
+            max_tokens=200,
             system=(
                 "Extract the client name and brief from a post generation request. "
-                "Return JSON: {\"client\": \"name\", \"brief\": \"the brief\", \"platform\": \"linkedin/instagram/facebook\"}\n"
+                "You have access to the recent conversation history — if the user references "
+                "a previous post (e.g. 'make a different one', 'try again but more minimal', "
+                "'same client but different approach'), use the history to understand what they mean.\n\n"
+                f"Recent conversation:\n{history}\n\n"
+                "Return JSON: {\"client\": \"name\", \"brief\": \"the full brief including any context from history\", \"platform\": \"linkedin/instagram/facebook\"}\n"
+                "If the user asks for a variation, include in the brief what was done before AND what they want different.\n"
                 "If no platform specified, default to linkedin. If no client specified, use \"ALL\"."
             ),
             messages=[{"role": "user", "content": text}],
@@ -323,9 +375,12 @@ async def _handle_make(msg, text: str) -> None:
         except Exception as e:
             logger.error(f"Failed to send image: {e}")
             await msg.reply_text(result_text, parse_mode="HTML")
+        # Track the result in conversation history
+        _add_to_history(user_id, "assistant", result_text[:500])
     else:
         # Error messages may contain angle brackets from logs — don't use HTML parse
         await status_msg.edit_text(result_text)
+        _add_to_history(user_id, "assistant", result_text[:300])
 
 
 async def _handle_templates(msg, text: str) -> None:
