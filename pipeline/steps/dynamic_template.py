@@ -280,8 +280,15 @@ async def save_liked_template(
     decisions: CreativeDecisions,
     template_html: str,
     concept_summary: str,
+    client: str = "ALL",
+    modifications: dict | None = None,
 ) -> None:
-    """Save a liked template combo to the Brain for future reference."""
+    """Save a liked template combo to the Brain for future reference.
+
+    Args:
+        modifications: Optional dict of changes to apply before saving,
+            e.g. {"color_accent": "#FF6B00", "font_headline": "Syne"}
+    """
     liked_data = {
         "template_style": decisions.template,
         "font_headline": decisions.font_headline,
@@ -293,12 +300,79 @@ async def save_liked_template(
         "headline": decisions.headline,
     }
 
+    # Apply modifications before saving
+    if modifications:
+        liked_data.update(modifications)
+        logger.info(f"Applied modifications to liked template: {modifications}")
+
     brain.store(
         topic="liked_template",
         source="user_feedback",
         content=json.dumps(liked_data),
-        client="ALL",
-        summary=f"Liked: {decisions.template} with {decisions.font_headline}, concept: {concept_summary[:50]}",
-        tags=["liked", decisions.template, decisions.font_headline],
+        client=client,
+        summary=f"Liked: {liked_data['template_style']} with {liked_data['font_headline']}, accent: {liked_data['color_accent']}, client: {client}",
+        tags=["liked", liked_data["template_style"], liked_data["font_headline"], client],
     )
-    logger.info(f"Saved liked template: {decisions.template} + {decisions.font_headline}")
+    logger.info(f"Saved liked template for {client}: {liked_data['template_style']} + {liked_data['font_headline']}")
+
+
+async def save_client_preference(
+    brain: Brain,
+    client: str,
+    preferences: dict,
+) -> None:
+    """Save client-specific design preferences (colors, fonts, rules).
+
+    Args:
+        preferences: e.g. {"accent_color": "#FF6B00", "brand_colors": ["#FF6B00", "#1A1A1A"],
+                           "preferred_font": "Syne", "rules": ["always use orange accent"]}
+    """
+    brain.store(
+        topic="client_preference",
+        source="user_feedback",
+        content=json.dumps(preferences),
+        client=client,
+        summary=f"Client preferences for {client}: {', '.join(f'{k}={v}' for k, v in list(preferences.items())[:3])}",
+        tags=["client_pref", client],
+    )
+    logger.info(f"Saved client preference for {client}: {preferences}")
+
+
+def get_client_preferences(brain: Brain, client: str) -> dict:
+    """Get accumulated preferences for a specific client."""
+    prefs = brain.query(topic="client_preference", client=client, limit=10)
+    liked = brain.query(topic="liked_template", client=client, limit=10)
+
+    merged = {}
+    # Merge all preference entries (latest wins)
+    for p in prefs:
+        try:
+            data = json.loads(p["content"])
+            merged.update(data)
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    # Extract patterns from liked templates for this client
+    liked_accents = []
+    liked_fonts = []
+    liked_templates = []
+    for l in liked:
+        try:
+            data = json.loads(l["content"])
+            if data.get("color_accent"):
+                liked_accents.append(data["color_accent"])
+            if data.get("font_headline"):
+                liked_fonts.append(data["font_headline"])
+            if data.get("template_style"):
+                liked_templates.append(data["template_style"])
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    if liked_accents:
+        merged["liked_accents"] = liked_accents
+    if liked_fonts:
+        merged["liked_fonts"] = liked_fonts
+    if liked_templates:
+        merged["liked_templates"] = liked_templates
+
+    return merged

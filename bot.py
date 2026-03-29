@@ -33,7 +33,7 @@ from taste.template_builder import build_templates, format_templates_summary, lo
 from pipeline.types import PipelineInput
 from pipeline.orchestrator import run_pipeline, format_result_for_telegram
 from pipeline.steps.render import render as render_post
-from pipeline.steps.dynamic_template import save_liked_template
+from pipeline.steps.dynamic_template import save_liked_template, save_client_preference, get_client_preferences
 from pipeline.types import CreativeDecisions, ImageResult
 
 # ── Logging ────────────────────────────────────────────────
@@ -301,17 +301,34 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if user_id in _last_post_by_user:
             last = _last_post_by_user[user_id]
             try:
+                # Use Sonnet to extract any modifications and client context
+                modifications, client_for_pref = await _extract_like_details(text, last)
+
                 concept_summary = ""
                 if hasattr(last.get("decisions"), "headline"):
                     concept_summary = last["decisions"].headline
+
+                client_name = client_for_pref or last.get("client", "ALL")
+
                 await save_liked_template(
                     brain=brain,
                     decisions=last["decisions"],
-                    template_html="",  # we track the decisions, not the full HTML
+                    template_html="",
                     concept_summary=concept_summary,
+                    client=client_name,
+                    modifications=modifications,
                 )
-                await msg.reply_text("❤️ Saved to your favorites! I'll use this style more often.")
-                _add_to_history(user_id, "assistant", "Saved to favorites.")
+
+                # If there are client-specific preferences, save them too
+                if modifications and client_name != "ALL":
+                    await save_client_preference(brain, client_name, modifications)
+
+                if modifications:
+                    changes = ", ".join(f"{k}: {v}" for k, v in modifications.items())
+                    await msg.reply_text(f"❤️ Saved with your changes ({changes}) for {client_name}!")
+                else:
+                    await msg.reply_text(f"❤️ Saved to favorites for {client_name}! I'll use this style more often.")
+                _add_to_history(user_id, "assistant", f"Saved to favorites for {client_name}.")
             except Exception as e:
                 logger.error(f"Failed to save liked template: {e}")
                 await msg.reply_text("❤️ Noted!")
@@ -345,6 +362,55 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await msg.reply_text(bot_reply)
     _add_to_history(user_id, "assistant", bot_reply)
+
+
+async def _extract_like_details(text: str, last_post: dict) -> tuple[dict | None, str | None]:
+    """Use Sonnet to extract modifications and client from a 'like' message.
+
+    Returns (modifications_dict, client_name) — both can be None.
+    Examples:
+      "I love it" → (None, None)
+      "I love it but use the orange of lmw" → ({"color_accent": "#FF6B00"}, "LMW")
+      "save this for georgoulis" → (None, "Georgoulis")
+    """
+    decisions = last_post.get("decisions")
+    if not decisions:
+        return None, None
+
+    try:
+        response = _ai_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            system=(
+                "The user liked a generated post and may want to save it with modifications.\n"
+                "Extract any design changes they want AND which client this is for.\n\n"
+                f"Current post details:\n"
+                f"  Font: {decisions.font_headline}\n"
+                f"  Colors: bg={decisions.color_bg}, text={decisions.color_text}, accent={decisions.color_accent}\n"
+                f"  Template: {decisions.template}\n"
+                f"  Client: {last_post.get('client', 'ALL')}\n\n"
+                "Return JSON:\n"
+                '{"modifications": {"color_accent": "#hex", ...} or null, "client": "ClientName" or null}\n\n'
+                "Only include fields that the user explicitly wants changed.\n"
+                "If they mention a color by name (orange, blue, red), convert to a reasonable hex.\n"
+                "If they mention a client name, extract it. Otherwise null.\n"
+                "Return ONLY JSON."
+            ),
+            messages=[{"role": "user", "content": text}],
+        )
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+        data = json.loads(raw)
+        mods = data.get("modifications")
+        client = data.get("client")
+        return mods, client
+    except Exception as e:
+        logger.warning(f"Could not extract like details: {e}")
+        return None, None
 
 
 async def _handle_make(msg, text: str, user_id: int = 0) -> None:

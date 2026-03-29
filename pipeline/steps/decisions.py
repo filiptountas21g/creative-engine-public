@@ -71,6 +71,31 @@ Return ONLY valid JSON:
 }"""
 
 
+def _format_client_prefs(prefs: dict | None, client: str) -> str:
+    """Format client-specific preferences for the decisions prompt."""
+    if not prefs:
+        return ""
+    lines = [f"⚡ CLIENT-SPECIFIC PREFERENCES FOR {client.upper()} (MUST follow these):"]
+    if prefs.get("accent_color") or prefs.get("color_accent"):
+        color = prefs.get("accent_color") or prefs.get("color_accent")
+        lines.append(f"  ACCENT COLOR: {color} — use this as the accent color")
+    if prefs.get("brand_colors"):
+        lines.append(f"  BRAND COLORS: {', '.join(prefs['brand_colors'])}")
+    if prefs.get("preferred_font") or prefs.get("font_headline"):
+        font = prefs.get("preferred_font") or prefs.get("font_headline")
+        lines.append(f"  PREFERRED FONT: {font}")
+    if prefs.get("liked_accents"):
+        lines.append(f"  Previously liked accents: {', '.join(prefs['liked_accents'][:5])}")
+    if prefs.get("liked_fonts"):
+        lines.append(f"  Previously liked fonts: {', '.join(prefs['liked_fonts'][:5])}")
+    if prefs.get("liked_templates"):
+        lines.append(f"  Previously liked templates: {', '.join(prefs['liked_templates'][:5])}")
+    if prefs.get("rules"):
+        for r in prefs["rules"]:
+            lines.append(f"  RULE: {r}")
+    return "\n".join(lines)
+
+
 def _format_previous(previous: list[dict] | None) -> str:
     """Format previous decisions so Opus knows what to avoid repeating."""
     if not previous:
@@ -100,6 +125,7 @@ async def creative_decisions(
     image: ImageResult,
     brain_ctx: BrainContext,
     previous_decisions: list[dict] | None = None,
+    client_preferences: dict | None = None,
 ) -> CreativeDecisions:
     """
     Make all final creative decisions — headline, fonts, colors, layout.
@@ -142,6 +168,8 @@ Brand tone: {brain_ctx.brand.get('tone', 'professional')}
 {f'FORCED TEMPLATE: {input.template_override}' if input.template_override else ''}
 
 {_format_previous(previous_decisions)}
+
+{_format_client_prefs(client_preferences, input.client)}
 
 Return only the JSON with all decisions."""
 

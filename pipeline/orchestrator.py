@@ -17,7 +17,7 @@ from pipeline.steps.copy import write_copy
 from pipeline.steps.image_gen import generate_image
 from pipeline.steps.decisions import creative_decisions
 from pipeline.steps.render import render
-from pipeline.steps.dynamic_template import generate_dynamic_template
+from pipeline.steps.dynamic_template import generate_dynamic_template, get_client_preferences
 from pipeline.steps.brain_write import brain_write
 
 logger = logging.getLogger(__name__)
@@ -85,9 +85,14 @@ async def run_pipeline(
 
         result.hero_image = image
 
+        # Fetch client-specific preferences (liked colors, fonts, rules)
+        client_prefs = get_client_preferences(brain, input.client)
+        if client_prefs:
+            await _notify("decisions", f"Found preferences for {input.client}")
+
         # Step 6: Creative Decisions (Opus)
         await _notify("decisions", "Opus is picking headline, font, colors...")
-        decisions = await creative_decisions(input, concept, copy, image, brain_ctx, previous_decisions)
+        decisions = await creative_decisions(input, concept, copy, image, brain_ctx, previous_decisions, client_prefs)
         result.decisions = decisions
         await _notify("decisions", (
             f"Template: {decisions.template}, "
