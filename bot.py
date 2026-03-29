@@ -58,7 +58,7 @@ MAX_HISTORY = 15
 _chat_history: dict[int, list[dict]] = {}
 
 # Track last pipeline result per user for edits
-_last_post_by_user: dict[int, dict] = {}  # {decisions, image, client, result}
+_last_post_by_user: dict[int, dict] = {}  # {decisions, image, client, template_html, logo_b64}
 
 # Track previous decisions per user for variety
 _previous_decisions: dict[int, list[dict]] = {}
@@ -769,6 +769,8 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
                 "decisions": result.decisions,
                 "image": result.hero_image,
                 "client": client_name,
+                "template_html": result.template_html,
+                "logo_b64": result.logo_b64,
             }
             if user_id not in _previous_decisions:
                 _previous_decisions[user_id] = []
@@ -883,16 +885,12 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
 
         await status_msg.edit_text("✏️ Re-rendering with your changes...")
 
-        # Fetch logo for this client
-        from pipeline.orchestrator import _get_client_logo
-        logo_b64 = _get_client_logo(brain, client_name)
+        # Reuse the SAME template HTML and logo from the original post
+        template_html = post_data.get("template_html")
+        logo_b64 = post_data.get("logo_b64")
 
-        # Re-generate dynamic template with logo awareness
-        from pipeline.steps.dynamic_template import generate_dynamic_template
-        dynamic_html = await generate_dynamic_template(new_decisions, brain, has_logo=logo_b64 is not None)
-
-        # Re-render with the same image but new decisions + logo
-        render_result = await render_post(new_decisions, image, client_name, dynamic_html=dynamic_html, logo_b64=logo_b64)
+        # Re-render with same template + same image, just updated decisions
+        render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64)
 
         # Build summary of what changed
         change_descriptions = []
@@ -912,11 +910,13 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
             caption=result_text[:1024],
         )
 
-        # Update stored post for further edits
+        # Update stored post for further edits (keep same template + logo)
         _last_post_by_user[user_id] = {
             "decisions": new_decisions,
             "image": image,
             "client": client_name,
+            "template_html": template_html,
+            "logo_b64": logo_b64,
         }
         _add_to_history(user_id, "assistant", result_text[:300])
 

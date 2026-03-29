@@ -128,6 +128,8 @@ async def run_pipeline(
         await _notify("render", "Rendering final PNG...")
         render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html, logo_b64=logo_b64)
         result.image_path = render_result.final_image_path
+        result.template_html = dynamic_html
+        result.logo_b64 = logo_b64
         await _notify("render", f"Rendered: {render_result.final_image_path}")
 
         # Step 8: Brain Write

@@ -105,4 +105,6 @@ class PipelineResult:
     copy: Optional[CopyOptions] = None
     decisions: Optional[CreativeDecisions] = None
     hero_image: Optional[ImageResult] = None
+    template_html: str = ""
+    logo_b64: Optional[str] = None
     error: str = ""
