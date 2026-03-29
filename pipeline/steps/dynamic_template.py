@@ -45,6 +45,7 @@ Placeholders (MANDATORY — the render engine replaces these):
   {{IMAGE_PATH}} — hero image (MUST be an <img> tag, NOT CSS background-image)
   {{CTA}} — call to action text
   {{CLIENT_NAME}} — client name for footer label
+  {{LOGO_PATH}} — OPTIONAL client logo (only include if has_logo is true). Place it small (40-60px) in a corner.
 
 CRITICAL RULES:
 - Every template MUST include <img src="{{IMAGE_PATH}}"> for the hero image
@@ -60,6 +61,7 @@ async def generate_dynamic_template(
     decisions: CreativeDecisions,
     brain: Brain,
     previous_templates: list[str] | None = None,
+    has_logo: bool = False,
 ) -> str:
     """
     Generate a fresh HTML template based on a random inspiration reference.
@@ -97,6 +99,8 @@ CREATIVE DECISIONS FOR THIS POST:
 The template style hint is just a suggestion — you can interpret it freely.
 For example, "split" doesn't have to be a strict 50/50 split — it could be 30/70, or angled, or overlapping.
 {avoid_text}
+
+{"Include a small logo (40-60px) in a tasteful position using: <img src=\"{{LOGO_PATH}}\" ...>. The client has a logo on file." if has_logo else "No client logo available — use {{CLIENT_NAME}} text label instead."}
 
 Make this layout UNIQUE. Don't default to basic split or centered layouts every time.
 Consider: asymmetric compositions, overlapping elements, creative image cropping,

@@ -5,6 +5,7 @@ Each step is independent. The orchestrator passes the accumulated
 context forward and handles errors per step.
 """
 
+import json
 import logging
 import time
 
@@ -21,6 +22,19 @@ from pipeline.steps.dynamic_template import generate_dynamic_template, get_clien
 from pipeline.steps.brain_write import brain_write
 
 logger = logging.getLogger(__name__)
+
+
+def _get_client_logo(brain: Brain, client: str) -> str | None:
+    """Fetch the latest logo for a client from the Brain. Returns base64 string or None."""
+    logos = brain.query(topic="brand_logo", client=client, limit=1)
+    if not logos:
+        # Also try with "ALL" as fallback
+        return None
+    try:
+        data = json.loads(logos[0]["content"])
+        return data.get("image_b64")
+    except (json.JSONDecodeError, KeyError):
+        return None
 
 
 async def run_pipeline(
@@ -99,14 +113,20 @@ async def run_pipeline(
             f"Font: {decisions.font_headline} {decisions.font_headline_weight}"
         ))
 
+        # Fetch client logo if available
+        logo_b64 = _get_client_logo(brain, input.client)
+        has_logo = logo_b64 is not None
+        if has_logo:
+            await _notify("template", f"Found logo for {input.client}")
+
         # Step 6b: Dynamic Template (Opus generates fresh layout from inspiration)
         await _notify("template", "Generating unique layout from your inspiration...")
-        dynamic_html = await generate_dynamic_template(decisions, brain)
+        dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=has_logo)
         await _notify("template", "Layout ready")
 
         # Step 7: Render (Playwright)
         await _notify("render", "Rendering final PNG...")
-        render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html)
+        render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html, logo_b64=logo_b64)
         result.image_path = render_result.final_image_path
         await _notify("render", f"Rendered: {render_result.final_image_path}")
 
@@ -162,13 +182,16 @@ async def run_carousel(
 
     client_prefs = get_client_preferences(brain, input.client)
 
+    # Fetch client logo
+    logo_b64 = _get_client_logo(brain, input.client)
+
     # ── First post: full pipeline to establish the design ──
     await _notify("carousel", f"Generating post 1/{count}...")
     first = await _generate_carousel_slide(
         input, research_result, brain_ctx, client_prefs, brain,
         slide_num=1, total=count,
         locked_decisions=None, locked_template_html=None,
-        on_progress=on_progress,
+        on_progress=on_progress, logo_b64=logo_b64,
     )
     results.append(first)
 
@@ -178,7 +201,7 @@ async def run_carousel(
     # Lock the design from post 1
     locked_decisions = first.decisions
     # Generate the template HTML once and reuse
-    locked_html = await generate_dynamic_template(locked_decisions, brain)
+    locked_html = await generate_dynamic_template(locked_decisions, brain, has_logo=logo_b64 is not None)
 
     # ── Posts 2-N: new concept + image, same design ──
     for i in range(2, count + 1):
@@ -197,7 +220,7 @@ async def run_carousel(
             varied_input, research_result, brain_ctx, client_prefs, brain,
             slide_num=i, total=count,
             locked_decisions=locked_decisions, locked_template_html=locked_html,
-            on_progress=on_progress,
+            on_progress=on_progress, logo_b64=logo_b64,
         )
         results.append(slide)
 
@@ -219,6 +242,7 @@ async def _generate_carousel_slide(
     locked_decisions=None,
     locked_template_html: str | None = None,
     on_progress=None,
+    logo_b64: str | None = None,
 ) -> PipelineResult:
     """Generate a single carousel slide."""
     result = PipelineResult()
@@ -278,10 +302,10 @@ async def _generate_carousel_slide(
 
         # Render
         if locked_template_html:
-            render_result = await render(decisions, image, input.client, dynamic_html=locked_template_html)
+            render_result = await render(decisions, image, input.client, dynamic_html=locked_template_html, logo_b64=logo_b64)
         else:
-            dynamic_html = await generate_dynamic_template(decisions, brain)
-            render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html)
+            dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=logo_b64 is not None)
+            render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html, logo_b64=logo_b64)
 
         result.image_path = render_result.final_image_path
         await _notify("render", f"Rendered slide {slide_num}")

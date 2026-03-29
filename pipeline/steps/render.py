@@ -22,6 +22,7 @@ def _inject_into_template(
     decisions: CreativeDecisions,
     image: ImageResult,
     client_name: str,
+    logo_b64: str | None = None,
 ) -> str:
     """Replace placeholders and CSS variables in the HTML template."""
     # Build Google Fonts URL (both headline and subtext)
@@ -52,6 +53,15 @@ def _inject_into_template(
     except Exception:
         img_src = f"file://{img_path}"
     html = html.replace("{{IMAGE_PATH}}", img_src)
+
+    # Logo — inject if available, otherwise remove placeholder
+    if logo_b64 and "{{LOGO_PATH}}" in html:
+        logo_src = f"data:image/png;base64,{logo_b64}"
+        html = html.replace("{{LOGO_PATH}}", logo_src)
+    elif "{{LOGO_PATH}}" in html:
+        # Remove the logo img tag entirely if no logo
+        import re
+        html = re.sub(r'<img[^>]*\{\{LOGO_PATH\}\}[^>]*/?\s*>', '', html)
 
     # Inject CSS variable overrides
     css_overrides = f"""
@@ -94,6 +104,7 @@ async def render(
     image: ImageResult,
     client_name: str,
     dynamic_html: str | None = None,
+    logo_b64: str | None = None,
 ) -> RenderResult:
     """
     Render the final post as a 1080x1080 PNG.
@@ -116,7 +127,7 @@ async def render(
             template_html = template_path.read_text(encoding="utf-8")
 
     # Inject decisions
-    final_html = _inject_into_template(template_html, decisions, image, client_name)
+    final_html = _inject_into_template(template_html, decisions, image, client_name, logo_b64)
 
     # Generate output path
     output_dir = Path(config.OUTPUT_DIR)
