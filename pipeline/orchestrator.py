@@ -17,6 +17,7 @@ from pipeline.steps.copy import write_copy
 from pipeline.steps.image_gen import generate_image
 from pipeline.steps.decisions import creative_decisions
 from pipeline.steps.render import render
+from pipeline.steps.dynamic_template import generate_dynamic_template
 from pipeline.steps.brain_write import brain_write
 
 logger = logging.getLogger(__name__)
@@ -93,9 +94,14 @@ async def run_pipeline(
             f"Font: {decisions.font_headline} {decisions.font_headline_weight}"
         ))
 
+        # Step 6b: Dynamic Template (Opus generates fresh layout from inspiration)
+        await _notify("template", "Generating unique layout from your inspiration...")
+        dynamic_html = await generate_dynamic_template(decisions, brain)
+        await _notify("template", "Layout ready")
+
         # Step 7: Render (Playwright)
         await _notify("render", "Rendering final PNG...")
-        render_result = await render(decisions, image, input.client)
+        render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html)
         result.image_path = render_result.final_image_path
         await _notify("render", f"Rendered: {render_result.final_image_path}")
 

@@ -33,6 +33,7 @@ from taste.template_builder import build_templates, format_templates_summary, lo
 from pipeline.types import PipelineInput
 from pipeline.orchestrator import run_pipeline, format_result_for_telegram
 from pipeline.steps.render import render as render_post
+from pipeline.steps.dynamic_template import save_liked_template
 from pipeline.types import CreativeDecisions, ImageResult
 
 # ── Logging ────────────────────────────────────────────────
@@ -94,12 +95,13 @@ def _get_history_text(user_id: int) -> str:
 ROUTER_PROMPT = """You classify user messages for a creative design bot. The user feeds inspiration images and generates social media posts.
 
 Intents:
-1. "feedback" — user is responding to a taste analysis (confirming, correcting, directing). Examples: "correct", "σωστά", "love it", "remove the lime", "not this", "i like the colors but not the font", "more editorial".
+1. "feedback" — user is responding to a taste analysis (confirming, correcting, directing). Examples: "correct", "σωστά", "remove the lime", "not this", "i like the colors but not the font", "more editorial".
 2. "taste" — user asks about their taste profile or what the system has learned. Examples: "what's my taste", "show me my preferences", "τι γούστο", "what have you learned about my style".
 3. "make" — user wants to generate a completely NEW post from scratch. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post", "make a different one with a new concept".
 4. "edit" — user wants to TWEAK the last generated post (move things, change colors, change font, resize, switch template). The image stays the same, only the layout/styling changes. Examples: "move the text inside the picture", "make the headline bigger", "change the background to white", "use a different template", "swap the font", "put the text on the right side".
-5. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
-6. "chat" — greeting, question, or anything else. Examples: "hey", "how does this work", "γεια".
+5. "like" — user approves/loves the last generated post. May ALSO ask for a new one in the same message. Examples: "I love this", "this is great", "perfect", "i really like it", "αυτό μου αρέσει", "i love it can you make me another one". If the message ONLY expresses approval with no request for a new post, return "like". If it ALSO asks for a new post, return "like_and_make".
+6. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
+7. "chat" — greeting, question, or anything else. Examples: "hey", "how does this work", "γεια".
 
 Has recent analysis: {has_analysis}
 Has recent post: {has_post}
@@ -125,8 +127,8 @@ def _route_intent(text: str, has_analysis: bool, user_id: int = 0) -> str:
             ),
             messages=[{"role": "user", "content": text}],
         )
-        intent = response.content[0].text.strip().lower().split()[0]
-        if intent in ("feedback", "taste", "make", "edit", "templates", "chat"):
+        intent = response.content[0].text.strip().lower().replace(" ", "_").split()[0]
+        if intent in ("feedback", "taste", "make", "edit", "like", "like_and_make", "templates", "chat"):
             return intent
         return "feedback" if has_analysis else "chat"
     except Exception:
@@ -294,6 +296,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _handle_make(msg, text, user_id)
         return
 
+    # ── LIKE / LIKE_AND_MAKE ──────────────────────────────
+    if intent in ("like", "like_and_make"):
+        if user_id in _last_post_by_user:
+            last = _last_post_by_user[user_id]
+            try:
+                concept_summary = ""
+                if hasattr(last.get("decisions"), "headline"):
+                    concept_summary = last["decisions"].headline
+                await save_liked_template(
+                    brain=brain,
+                    decisions=last["decisions"],
+                    template_html="",  # we track the decisions, not the full HTML
+                    concept_summary=concept_summary,
+                )
+                await msg.reply_text("❤️ Saved to your favorites! I'll use this style more often.")
+                _add_to_history(user_id, "assistant", "Saved to favorites.")
+            except Exception as e:
+                logger.error(f"Failed to save liked template: {e}")
+                await msg.reply_text("❤️ Noted!")
+
+        if intent == "like_and_make":
+            await _handle_make(msg, text, user_id)
+        return
+
     # ── EDIT ──────────────────────────────────────────────
     if intent == "edit":
         if user_id in _last_post_by_user:
@@ -368,7 +394,7 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
             emojis = {
                 "research": "🔍", "brain": "🧠", "concept": "💡",
                 "copy": "📝", "image": "🖼️", "decisions": "🎯",
-                "render": "🖨️", "brain_write": "💾",
+                "template": "📐", "render": "🖨️", "brain_write": "💾",
             }
             emoji = emojis.get(step, "⏳")
             await status_msg.edit_text(

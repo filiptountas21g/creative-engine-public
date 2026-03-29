@@ -62,8 +62,20 @@ class Brain:
             ]
         }
 
-        resp = self.session.post(f"{self.http_url}/v2/pipeline", json=body, timeout=15)
-        resp.raise_for_status()
+        # Retry up to 3 times on connection errors
+        import time as _time
+        last_err = None
+        for attempt in range(3):
+            try:
+                resp = self.session.post(f"{self.http_url}/v2/pipeline", json=body, timeout=15)
+                resp.raise_for_status()
+                break
+            except (requests.ConnectionError, requests.Timeout) as e:
+                last_err = e
+                if attempt < 2:
+                    _time.sleep(1)
+                    continue
+                raise last_err
         data = resp.json()
 
         # Extract results from pipeline response

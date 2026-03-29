@@ -40,6 +40,7 @@ async def get_taste_context(brain: Brain, client: str = None) -> dict:
     # Extract patterns
     font_categories = []
     color_temps = []
+    color_hexes = []
     compositions = []
     moods = []
     rules = []
@@ -52,10 +53,22 @@ async def get_taste_context(brain: Brain, client: str = None) -> dict:
             comp = data.get("composition", {})
             feel = data.get("feeling", {})
 
-            if typo.get("font_category"):
+            # Typography: handle both list (new) and dict (old) format
+            if isinstance(typo, list):
+                for t in typo:
+                    if t.get("font_category"):
+                        font_categories.append(t["font_category"])
+            elif isinstance(typo, dict) and typo.get("font_category"):
                 font_categories.append(typo["font_category"])
+
+            # Colors: handle both palette (new) and flat (old) format
             if colors.get("temperature"):
                 color_temps.append(colors["temperature"])
+            palette = colors.get("palette", [])
+            for c in palette:
+                if c.get("hex"):
+                    color_hexes.append(c["hex"])
+
             if comp.get("template_match"):
                 compositions.append(comp["template_match"])
             if feel.get("mood"):
@@ -69,8 +82,13 @@ async def get_taste_context(brain: Brain, client: str = None) -> dict:
     for entry in confirmed_typo:
         try:
             data = json.loads(entry["content"])
-            if data.get("font_category"):
-                font_categories.extend([data["font_category"]] * 2)  # double weight for confirmed
+            # Handle both list and dict format
+            if isinstance(data, list):
+                for t in data:
+                    if t.get("font_category"):
+                        font_categories.extend([t["font_category"]] * 2)
+            elif isinstance(data, dict) and data.get("font_category"):
+                font_categories.extend([data["font_category"]] * 2)
         except (json.JSONDecodeError, KeyError):
             continue
 
@@ -108,8 +126,9 @@ async def get_taste_context(brain: Brain, client: str = None) -> dict:
             client_specific[client] = _summarize_client_taste(client_refs, client_corrections)
 
     # Count most common
-    top_fonts = [f for f, _ in Counter(font_categories).most_common(3)]
-    top_temps = [t for t, _ in Counter(color_temps).most_common(2)]
+    top_fonts = [f for f, _ in Counter(font_categories).most_common(5)]
+    top_temps = [t for t, _ in Counter(color_temps).most_common(3)]
+    top_colors = [c for c, _ in Counter(color_hexes).most_common(10)]
     top_comps = [c for c, _ in Counter(compositions).most_common(3)]
     top_moods = [m for m, _ in Counter(moods).most_common(3)]
     top_rules = [r for r, _ in Counter(rules).most_common(5)]
@@ -117,11 +136,12 @@ async def get_taste_context(brain: Brain, client: str = None) -> dict:
     return {
         "preferred_fonts": top_fonts,
         "preferred_color_temperatures": top_temps,
+        "preferred_colors": top_colors,
         "preferred_compositions": top_comps,
         "preferred_moods": top_moods,
         "confirmed_rules": top_rules,
         "avoid": list(set(avoid)),
-        "corrections": correction_notes[-5:],  # last 5 corrections
+        "corrections": correction_notes[-5:],
         "client_specific": client_specific,
         "total_references": len(all_refs),
     }
@@ -204,7 +224,9 @@ async def get_taste_summary(brain: Brain, aspect: str = None) -> str:
     if ctx.get("preferred_fonts"):
         lines.append("📝 <b>Fonts:</b> " + ", ".join(ctx["preferred_fonts"]))
     if ctx.get("preferred_color_temperatures"):
-        lines.append("🎨 <b>Colors:</b> " + ", ".join(ctx["preferred_color_temperatures"]))
+        lines.append("🌡️ <b>Color temp:</b> " + ", ".join(ctx["preferred_color_temperatures"]))
+    if ctx.get("preferred_colors"):
+        lines.append("🎨 <b>Top colors:</b> " + ", ".join(ctx["preferred_colors"][:6]))
     if ctx.get("preferred_compositions"):
         lines.append("📐 <b>Layouts:</b> " + ", ".join(ctx["preferred_compositions"]))
     if ctx.get("preferred_moods"):

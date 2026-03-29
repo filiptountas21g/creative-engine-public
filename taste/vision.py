@@ -2,7 +2,8 @@
 Claude Vision analysis — the heart of the taste engine.
 
 Takes an inspiration image and returns a full structured breakdown:
-typography, colors, composition, feeling, what makes it work, reusable rules.
+typography (multiple), colors (all), composition, layers, feeling,
+what makes it work, reusable rules.
 """
 
 import base64
@@ -29,58 +30,76 @@ Your analysis is used to build a design system — it must be precise, specific,
 
 For each image, extract:
 
-1. TYPOGRAPHY — font category (geometric sans, humanist sans, transitional serif, slab serif,
-   display, handwritten), estimated weight (100-900), estimated size in pt, letter-spacing/tracking,
-   line-height, text case, hierarchy (what's biggest, what's secondary), what the typography communicates.
+1. TYPOGRAPHY — designs often have MULTIPLE typefaces. Extract EACH one separately.
+   For every distinct typeface you see (headline, subhead, body, label, date, CTA, etc.), create
+   an entry with: role (what it's used for), font category, estimated weight, size, tracking, case,
+   and what it communicates. A design with 3 different text styles = 3 typography entries.
 
-2. COLORS — exact hex codes for background, primary text, accent, and any other colors visible.
-   Color temperature (warm/cool/neutral). Contrast level. Overall palette mood.
+2. COLORS — extract EVERY distinct color visible in the design.
+   Do NOT simplify. A design with 6 colors should have 6 colors listed.
+   For each color: exact hex code, descriptive name, and where it's used in the design.
+   Also: overall temperature, contrast level, palette mood.
 
-3. COMPOSITION — layout type (object-hero, text-dominant, split, full-bleed, grid, asymmetric).
-   Object coverage percentage. Negative space percentage. Text position on the image.
-   Text alignment. Approximate margins in pixels (assuming 1080x1080). Visual weight distribution.
-   Grid feeling (editorial, centered, asymmetric, etc).
+3. COMPOSITION — layout type, coverage percentages, text positions, margins, grid feeling.
 
-4. FEELING — mood, energy level (low/medium/high), sophistication level, brand impression.
+4. LAYERS — describe the image as if you're explaining it to someone who will rebuild it.
+   List every visual element from back to front (z-order):
+   - What is each layer? (background color, photo, color block, text, icon, badge, gradient, etc.)
+   - Where is it positioned? (top-left, center, spanning full width, etc.)
+   - How big is it relative to the canvas?
+   - How does it interact with other layers? (overlapping, adjacent, floating, anchored)
+   This is the most important section — it should read like assembly instructions.
 
-5. WHAT MAKES IT WORK — 2-3 sentences explaining WHY this design is effective. Be specific.
+5. FEELING — mood, energy level, sophistication level, brand impression.
 
-6. REUSABLE RULES — 3-5 concrete, actionable design rules extracted from this image that can
-   be applied to future designs.
+6. WHAT MAKES IT WORK — 2-3 sentences explaining WHY this design is effective. Be specific.
+
+7. REUSABLE RULES — 3-5 concrete, actionable design rules from this image.
 
 Return ONLY valid JSON. No markdown, no explanation outside the JSON.
 
 The JSON schema:
 {
-  "typography": {
-    "font_category": "string",
-    "estimated_weight": "string (e.g. 700-800)",
-    "estimated_size_pt": number,
-    "tracking": "string (e.g. tight, -0.02em)",
-    "line_height": number,
-    "case": "string (uppercase/lowercase/sentence/mixed)",
-    "hierarchy": "string",
-    "what_it_communicates": "string"
-  },
+  "typography": [
+    {
+      "role": "string (e.g. headline, subhead, body, label, date, CTA, caption)",
+      "text_content": "string (the actual text shown)",
+      "font_category": "string (geometric sans, humanist sans, transitional serif, slab serif, display, handwritten, monospace)",
+      "estimated_weight": "string (e.g. 700-800)",
+      "estimated_size_pt": number,
+      "tracking": "string (e.g. tight, -0.02em, normal, wide)",
+      "case": "string (uppercase/lowercase/sentence/mixed)",
+      "what_it_communicates": "string"
+    }
+  ],
   "colors": {
-    "background": {"hex": "string", "name": "string"},
-    "text_primary": {"hex": "string", "name": "string"},
-    "accent": {"hex": "string", "name": "string"},
-    "additional": [{"hex": "string", "name": "string", "usage": "string"}],
-    "temperature": "string (warm/cool/neutral)",
+    "palette": [
+      {"hex": "string", "name": "string", "usage": "string (where in the design)"}
+    ],
+    "temperature": "string (warm/cool/neutral/mixed)",
     "contrast": "string (low/medium/high)",
     "palette_mood": "string"
   },
   "composition": {
-    "template_match": "string (object-hero/text-dominant/split/full-bleed/grid/asymmetric)",
+    "template_match": "string (object-hero/text-dominant/split/full-bleed/grid/asymmetric/card-based)",
     "object_coverage_pct": number,
     "negative_space_pct": number,
-    "text_position": "string (top-left/top-right/bottom-left/bottom-right/center/etc)",
+    "text_position": "string",
     "text_alignment": "string (left/center/right)",
     "margin_px": number,
     "visual_weight_distribution": "string",
     "grid_feeling": "string"
   },
+  "layers": [
+    {
+      "order": number,
+      "type": "string (background/photo/color-block/text/icon/badge/gradient/shape/logo/overlay)",
+      "description": "string (what it is)",
+      "position": "string (where on the canvas)",
+      "size": "string (relative size, e.g. full-width, ~30% of canvas, small pill)",
+      "interaction": "string (how it relates to other layers)"
+    }
+  ],
   "feeling": {
     "mood": "string",
     "energy": "string (low/medium/high)",
@@ -129,15 +148,9 @@ async def analyze_inspiration(
     """
     Analyze an inspiration image with Claude Vision.
 
-    Args:
-        image_path: Path to the image file.
-        context: Optional user caption/context (e.g. "love the typography here",
-                 "this is for Somamed"). If provided, the analysis focuses on
-                 what the user highlighted.
-
     Returns:
         Full breakdown dict with keys: typography, colors, composition,
-        feeling, what_makes_it_work, reusable_rules.
+        layers, feeling, what_makes_it_work, reusable_rules.
     """
     image_b64 = _image_to_base64(image_path)
 
@@ -198,29 +211,57 @@ async def analyze_inspiration(
 
 def format_analysis_for_telegram(analysis: dict) -> str:
     """Format a vision analysis into a human-readable Telegram message."""
-    typo = analysis.get("typography", {})
+    typo_list = analysis.get("typography", [])
     colors = analysis.get("colors", {})
     comp = analysis.get("composition", {})
+    layers = analysis.get("layers", [])
     feel = analysis.get("feeling", {})
     rules = analysis.get("reusable_rules", [])
 
+    # Handle old format where typography is a dict instead of list
+    if isinstance(typo_list, dict):
+        typo_list = [typo_list]
+
     lines = ["🔍 <b>Here's what I see in this image:</b>\n"]
 
-    # Typography
+    # Typography (multiple)
     lines.append("📝 <b>Typography</b>")
-    lines.append(f"  • {typo.get('font_category', '?')}, ~{typo.get('estimated_size_pt', '?')}pt, weight {typo.get('estimated_weight', '?')}")
-    lines.append(f"  • {typo.get('case', '?')} case, tracking: {typo.get('tracking', '?')}")
-    lines.append(f"  • Communicates: {typo.get('what_it_communicates', '?')}")
+    for t in typo_list:
+        role = t.get("role", "text")
+        text_shown = t.get("text_content", "")
+        cat = t.get("font_category", "?")
+        weight = t.get("estimated_weight", "?")
+        size = t.get("estimated_size_pt", "?")
+        case = t.get("case", "?")
+        tracking = t.get("tracking", "?")
+        communicates = t.get("what_it_communicates", "")
 
-    # Colors
-    bg = colors.get("background", {})
-    txt = colors.get("text_primary", {})
-    accent = colors.get("accent", {})
+        text_preview = f' "{text_shown[:30]}"' if text_shown else ""
+        lines.append(f"  <b>{role}</b>{text_preview}")
+        lines.append(f"    {cat}, ~{size}pt, weight {weight}, {case}, tracking: {tracking}")
+        if communicates:
+            lines.append(f"    → {communicates}")
+
+    # Colors (all of them)
+    palette = colors.get("palette", [])
+    # Backwards compatibility: old format with background/text_primary/accent/additional
+    if not palette:
+        bg = colors.get("background", {})
+        txt = colors.get("text_primary", {})
+        accent = colors.get("accent", {})
+        additional = colors.get("additional", [])
+        if bg.get("hex"):
+            palette.append({"hex": bg["hex"], "name": bg.get("name", "?"), "usage": "background"})
+        if txt.get("hex"):
+            palette.append({"hex": txt["hex"], "name": txt.get("name", "?"), "usage": "primary text"})
+        if accent.get("hex") and accent["hex"].upper() not in ("#FFFFFF", "#000000"):
+            palette.append({"hex": accent["hex"], "name": accent.get("name", "?"), "usage": "accent"})
+        for extra in additional:
+            palette.append(extra)
+
     lines.append(f"\n🎨 <b>Colors</b>")
-    lines.append(f"  • Background: {bg.get('name', '?')} ({bg.get('hex', '?')})")
-    lines.append(f"  • Text: {txt.get('name', '?')} ({txt.get('hex', '?')})")
-    if accent.get("hex"):
-        lines.append(f"  • Accent: {accent.get('name', '?')} ({accent.get('hex', '?')})")
+    for c in palette:
+        lines.append(f"  • {c.get('name', '?')} ({c.get('hex', '?')}) — {c.get('usage', '?')}")
     lines.append(f"  • Temperature: {colors.get('temperature', '?')}, contrast: {colors.get('contrast', '?')}")
 
     # Composition
@@ -229,6 +270,20 @@ def format_analysis_for_telegram(analysis: dict) -> str:
     lines.append(f"  • Object coverage: ~{comp.get('object_coverage_pct', '?')}%, negative space: ~{comp.get('negative_space_pct', '?')}%")
     lines.append(f"  • Text position: {comp.get('text_position', '?')}, {comp.get('text_alignment', '?')} aligned")
     lines.append(f"  • Grid: {comp.get('grid_feeling', '?')}")
+
+    # Layers (new!)
+    if layers:
+        lines.append(f"\n🧱 <b>Layers (back → front)</b>")
+        for layer in sorted(layers, key=lambda l: l.get("order", 0)):
+            ltype = layer.get("type", "?")
+            desc = layer.get("description", "?")
+            pos = layer.get("position", "?")
+            size = layer.get("size", "?")
+            interaction = layer.get("interaction", "")
+            lines.append(f"  {layer.get('order', '?')}. <b>{ltype}</b>: {desc}")
+            lines.append(f"     📍 {pos}, {size}")
+            if interaction:
+                lines.append(f"     ↔️ {interaction}")
 
     # Feeling
     lines.append(f"\n✨ <b>Feeling</b>")

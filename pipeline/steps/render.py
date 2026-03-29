@@ -93,24 +93,27 @@ async def render(
     decisions: CreativeDecisions,
     image: ImageResult,
     client_name: str,
+    dynamic_html: str | None = None,
 ) -> RenderResult:
     """
     Render the final post as a 1080x1080 PNG.
 
-    Loads the HTML template, injects all decisions as CSS variables,
-    and screenshots with Playwright.
+    If dynamic_html is provided, uses that directly.
+    Otherwise loads from the template file on disk.
     """
     from playwright.async_api import async_playwright
 
-    # Load template
-    template_path = Path(config.TEMPLATES_DIR) / f"{decisions.template}.html"
-
-    if not template_path.exists():
-        # Fall back to a minimal inline template
-        logger.warning(f"Template {decisions.template} not found — using fallback")
-        template_html = _fallback_template()
+    # Use dynamic HTML if provided, otherwise load from file
+    if dynamic_html:
+        template_html = dynamic_html
+        logger.info("Using dynamic template")
     else:
-        template_html = template_path.read_text(encoding="utf-8")
+        template_path = Path(config.TEMPLATES_DIR) / f"{decisions.template}.html"
+        if not template_path.exists():
+            logger.warning(f"Template {decisions.template} not found — using fallback")
+            template_html = _fallback_template()
+        else:
+            template_html = template_path.read_text(encoding="utf-8")
 
     # Inject decisions
     final_html = _inject_into_template(template_html, decisions, image, client_name)
