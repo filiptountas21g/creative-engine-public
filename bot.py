@@ -92,17 +92,19 @@ def _get_history_text(user_id: int) -> str:
 
 # ── Intent Router ─────────────────────────────────────────
 
-ROUTER_PROMPT = """You classify user messages for a creative design bot. The user feeds inspiration images and generates social media posts.
+ROUTER_PROMPT = """You classify user messages for a creative design bot. The user feeds inspiration images and generates social media posts. The user speaks both English and Greek — understand both.
 
 Intents:
 1. "feedback" — user is responding to a taste analysis (confirming, correcting, directing). Examples: "correct", "σωστά", "remove the lime", "not this", "i like the colors but not the font", "more editorial".
 2. "taste" — user asks about their taste profile or what the system has learned. Examples: "what's my taste", "show me my preferences", "τι γούστο", "what have you learned about my style".
-3. "make" — user wants to generate a single NEW post from scratch. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post", "make a different one with a new concept".
-3b. "carousel" — user wants MULTIPLE posts with a cohesive look. Examples: "make a carousel of 6 posts for LMW", "create 4 posts same style", "make 6 slides for georgoulis", "do a series of posts".
-4. "edit" — user wants to TWEAK the last generated post (move things, change colors, change font, resize, switch template). The image stays the same, only the layout/styling changes. Examples: "move the text inside the picture", "make the headline bigger", "change the background to white", "use a different template", "swap the font", "put the text on the right side".
-5. "like" — user approves/loves the last generated post. May ALSO ask for a new one in the same message. Examples: "I love this", "this is great", "perfect", "i really like it", "αυτό μου αρέσει", "i love it can you make me another one". If the message ONLY expresses approval with no request for a new post, return "like". If it ALSO asks for a new post, return "like_and_make".
+3. "make" — user wants to generate a single NEW post from scratch. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post", "make a different one with a new concept", "κάνε μου ένα post".
+3b. "carousel" — user wants MULTIPLE posts with a cohesive look. Examples: "make a carousel of 6 posts for LMW", "create 4 posts same style", "make 6 slides for georgoulis", "do a series of posts", "κάνε μου ένα καρουσέλ", "φτιάξε 6 posts", "μπορείς να κάνεις καρουσέλ". ANY mention of "carousel", "καρουσέλ", "series", or multiple posts = carousel.
+4. "edit" — user wants to TWEAK the last generated post (move things, change colors, change font, resize, switch template). The image stays the same, only the layout/styling changes. Examples: "move the text inside the picture", "make the headline bigger", "change the background to white", "use a different template", "swap the font", "put the text on the right side", "βάλε το κείμενο μέσα στην εικόνα".
+5. "like" — user approves/loves the last generated post. May ALSO ask for a new one in the same message. Examples: "I love this", "this is great", "perfect", "i really like it", "αυτό μου αρέσει", "μου αρέσει πολύ". If the message ONLY expresses approval with no request for a new post, return "like". If it ALSO asks for a new post (e.g. "μου αρέσει, κάνε μου ένα ακόμα" / "i love it can you make me another one"), return "like_and_make". If it asks for a carousel too, return "carousel".
 6. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
-7. "chat" — greeting, question, or anything else. Examples: "hey", "how does this work", "γεια".
+7. "chat" — ONLY for greetings, general questions, or things that don't fit any other intent. Examples: "hey", "how does this work", "γεια", "μιλάς ελληνικά".
+
+IMPORTANT: If the message contains BOTH approval AND a request (like "μου αρέσει, κάνε μου καρουσέλ"), prioritize the ACTION intent (carousel > like_and_make > like).
 
 Has recent analysis: {has_analysis}
 Has recent post: {has_post}
@@ -358,14 +360,50 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     # ── CHAT (default) ───────────────────────────────────
-    bot_reply = (
-        "🎨 Lectus Creative Engine\n\n"
-        "📸 Στείλε μου φωτογραφίες → μαθαίνω το γούστο σου\n"
-        "💬 Πες μου αν συμφωνείς → επιβεβαιώνω τις προτιμήσεις\n"
-        "🎯 'Φτιάξε post για Somamed' → δημιουργώ\n"
-        "🎨 'Τι γούστο έχω;' → σου δείχνω\n"
-        "📐 'Rebuild templates' → ξαναφτιάχνω templates"
+    await _handle_chat(msg, text, user_id)
+
+
+async def _handle_chat(msg, text: str, user_id: int) -> None:
+    """Have a natural conversation using Claude with full history context."""
+    history = _chat_history.get(user_id, [])
+
+    # Build messages for Claude
+    system = (
+        "You are John, a creative design assistant for Lectus Creative Engine. "
+        "You help Filip create social media posts, learn his design taste, and manage templates. "
+        "You speak naturally in whatever language the user speaks (Greek or English). "
+        "Keep responses short and conversational — 2-3 sentences max.\n\n"
+        "Your capabilities:\n"
+        "- Generate posts: user says 'make a post for [client]'\n"
+        "- Generate carousels: user says 'make a carousel of 6 for [client]'\n"
+        "- Learn taste: user sends inspiration photos\n"
+        "- Edit posts: user says 'move the text', 'change the font', etc.\n"
+        "- Save favorites: user says 'I love this'\n"
+        "- Show taste: user asks about their preferences\n\n"
+        "If the user is asking for something you can do (make post, carousel, etc.), "
+        "gently guide them to phrase it so you can act on it. "
+        "Don't just dump a menu — have a real conversation."
     )
+
+    messages = []
+    for h in history[-10:]:  # last 10 for context
+        messages.append({"role": h["role"], "content": h["content"]})
+    # Make sure last message is user
+    if not messages or messages[-1]["role"] != "user":
+        messages.append({"role": "user", "content": text})
+
+    try:
+        response = _ai_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            system=system,
+            messages=messages,
+        )
+        bot_reply = response.content[0].text.strip()
+    except Exception as e:
+        logger.error(f"Chat failed: {e}")
+        bot_reply = "🎨 Hey! Send me a photo to learn your taste, or say 'make a post for [client]' to create something."
+
     await msg.reply_text(bot_reply)
     _add_to_history(user_id, "assistant", bot_reply)
 
