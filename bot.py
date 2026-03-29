@@ -138,17 +138,19 @@ def _route_intent(text: str, has_analysis: bool, user_id: int = 0) -> str:
         return "feedback" if has_analysis else "chat"
 
 
-# ── Photo handler (taste ingestion) ──────────────────────
+# ── Photo handler (taste ingestion + logo detection) ─────
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming photos — analyze with Claude Vision."""
+    """Handle incoming photos — Claude decides if it's a logo/brand asset or inspiration."""
     msg = update.message
     if not msg or not msg.photo:
         return
 
     photo = msg.photo[-1]
     caption = msg.caption or ""
+    user_id = msg.from_user.id if msg.from_user else 0
+    history = _get_history_text(user_id)
 
-    status_msg = await msg.reply_text("🔍 Analyzing this image...")
+    status_msg = await msg.reply_text("🔍 Looking at this...")
 
     try:
         file = await photo.get_file()
@@ -156,9 +158,19 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             tmp_path = Path(tmp.name)
         await file.download_to_drive(str(tmp_path))
 
+        # Step 1: Claude classifies what this image is
+        image_intent = await _classify_image(tmp_path, caption, history)
+        logger.info(f"[photo] classified as: {image_intent}")
+
+        if image_intent.get("type") == "logo":
+            # ── LOGO / BRAND ASSET ──
+            await _handle_logo_upload(msg, status_msg, tmp_path, caption, image_intent, user_id)
+            return
+
+        # ── INSPIRATION (default) ──
         analysis = await analyze_inspiration(tmp_path, context=caption)
 
-        client = _extract_client_from_caption(caption)
+        client = image_intent.get("client") or _extract_client_from_caption(caption)
 
         brain.store(
             topic="taste_reference",
@@ -183,7 +195,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if len(analysis_text) <= 4000:
             reply = await msg.reply_text(analysis_text, parse_mode="HTML")
         else:
-            # Split at double newlines
             chunks = []
             remaining = analysis_text
             while remaining:
@@ -203,9 +214,9 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         if reply:
             _analysis_by_msg[reply.message_id] = analysis
-        _last_analysis_by_user[msg.from_user.id] = analysis
-        _add_to_history(msg.from_user.id, "user", "[sent inspiration photo]")
-        _add_to_history(msg.from_user.id, "assistant", f"[analyzed image: {analysis.get('feeling', {}).get('mood', '?')} mood, {analysis.get('composition', {}).get('template_match', '?')} layout]")
+        _last_analysis_by_user[user_id] = analysis
+        _add_to_history(user_id, "user", f"[sent inspiration photo] {caption}")
+        _add_to_history(user_id, "assistant", f"[analyzed image: {analysis.get('feeling', {}).get('mood', '?')} mood, {analysis.get('composition', {}).get('template_match', '?')} layout]")
 
     except Exception as e:
         logger.error(f"Photo analysis failed: {e}")
@@ -218,6 +229,100 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             tmp_path.unlink()
         except Exception:
             pass
+
+
+async def _classify_image(image_path: Path, caption: str, history: str) -> dict:
+    """Use Claude Vision to classify an uploaded image: logo, brand asset, or inspiration."""
+    import base64
+
+    img_bytes = image_path.read_bytes()
+    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+    # Detect media type
+    suffix = image_path.suffix.lower()
+    media_type = "image/jpeg"
+    if suffix == ".png":
+        media_type = "image/png"
+    elif suffix in (".webp",):
+        media_type = "image/webp"
+
+    try:
+        response = _ai_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Look at this image and the user's caption/context. Classify it:\n\n"
+                            f"Caption: '{caption}'\n"
+                            f"Recent conversation:\n{history}\n\n"
+                            "Is this:\n"
+                            "1. 'logo' — a company logo, brand mark, icon, or brand asset the user wants saved\n"
+                            "2. 'inspiration' — a design reference, post example, or aesthetic inspiration\n\n"
+                            "Also extract the client/brand name if mentioned.\n\n"
+                            'Return ONLY JSON: {"type": "logo" or "inspiration", "client": "BrandName" or null, "reason": "brief reason"}'
+                        ),
+                    },
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": img_b64,
+                        },
+                    },
+                ],
+            }],
+        )
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+        return json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Image classification failed: {e}")
+        return {"type": "inspiration", "client": None}
+
+
+async def _handle_logo_upload(msg, status_msg, image_path: Path, caption: str, intent: dict, user_id: int):
+    """Save a logo/brand asset to the Brain for a specific client."""
+    import base64
+
+    client = intent.get("client", "ALL")
+    img_bytes = image_path.read_bytes()
+    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+    # Store logo in Brain
+    brain.store(
+        topic="brand_logo",
+        source="telegram",
+        content=json.dumps({
+            "image_b64": img_b64,
+            "client": client,
+            "caption": caption,
+            "reason": intent.get("reason", ""),
+        }, ensure_ascii=False),
+        client=client,
+        summary=f"Logo for {client}",
+        tags=["logo", "brand_asset", client.lower()],
+    )
+
+    await status_msg.delete()
+    reply = f"✅ Logo saved for {client}! I'll use it when making posts for {client}."
+    await msg.reply_text(reply)
+    _add_to_history(user_id, "user", f"[uploaded logo for {client}] {caption}")
+    _add_to_history(user_id, "assistant", reply)
+
+    # Clean up
+    try:
+        image_path.unlink()
+    except Exception:
+        pass
 
 
 def _extract_client_from_caption(caption: str) -> str | None:
