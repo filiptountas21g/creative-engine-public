@@ -105,7 +105,8 @@ Intents:
 4b. "reimage" — user wants to REPLACE THE PHOTO/IMAGE in the last post while keeping the design. Examples: "replace the photo", "change the picture", "use a stock photo instead", "find a different image", "swap the image", "try another photo", "αλλαξε την εικόνα", "βάλε άλλη φωτογραφία", "use a real photo". This is NOT "edit" — edit changes CSS/layout, reimage changes the actual hero image.
 5. "like" — user approves/loves the last generated post. May ALSO ask for a new one in the same message. Examples: "I love this", "this is great", "perfect", "i really like it", "αυτό μου αρέσει", "μου αρέσει πολύ". If the message ONLY expresses approval with no request for a new post, return "like". If it ALSO asks for a new post (e.g. "μου αρέσει, κάνε μου ένα ακόμα" / "i love it can you make me another one"), return "like_and_make". If it asks for a carousel too, return "carousel".
 6. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
-7. "chat" — ONLY for greetings, general questions, or things that don't fit any other intent. Examples: "hey", "how does this work", "γεια", "μιλάς ελληνικά".
+7. "resend" — user asks to see or receive the last generated post again. Examples: "send it to me", "show me", "send it", "δειξε μου", "στείλε μου το", "show me the post", "can I see it". Only if there IS a recent post.
+8. "chat" — ONLY for greetings, general questions, or things that don't fit any other intent. Examples: "hey", "how does this work", "γεια", "μιλάς ελληνικά".
 
 IMPORTANT: If the message contains BOTH approval AND a request (like "μου αρέσει, κάνε μου καρουσέλ"), prioritize the ACTION intent (carousel > like_and_make > like).
 
@@ -134,7 +135,7 @@ def _route_intent(text: str, has_analysis: bool, user_id: int = 0) -> str:
             messages=[{"role": "user", "content": text}],
         )
         intent = response.content[0].text.strip().lower().replace(" ", "_").split()[0]
-        if intent in ("feedback", "taste", "make", "carousel", "edit", "reimage", "like", "like_and_make", "templates", "chat"):
+        if intent in ("feedback", "taste", "make", "carousel", "edit", "reimage", "like", "like_and_make", "templates", "resend", "chat"):
             return intent
         return "feedback" if has_analysis else "chat"
     except Exception:
@@ -471,6 +472,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             _add_to_history(user_id, "assistant", "No recent post to reimage.")
         return
 
+    # ── RESEND ───────────────────────────────────────────
+    if intent == "resend":
+        if user_id in _last_post_by_user:
+            post_data = _last_post_by_user[user_id]
+            rendered = post_data.get("rendered_path")
+            if rendered and Path(rendered).exists():
+                await msg.reply_photo(
+                    photo=open(Path(rendered), "rb"),
+                    caption=f"📎 Last post for {post_data.get('client', '?')}",
+                )
+                _add_to_history(user_id, "assistant", "Re-sent last post.")
+            else:
+                await msg.reply_text("⚠️ The rendered file is no longer available. Try generating a new one.")
+        else:
+            await msg.reply_text("🤷 I don't have a recent post. Make one first!")
+        return
+
     # ── TEMPLATES ────────────────────────────────────────
     if intent == "templates":
         await _handle_templates(msg, text)
@@ -696,6 +714,7 @@ async def _handle_carousel(msg, text: str, user_id: int = 0) -> None:
                 "client": client_name,
                 "template_html": getattr(last, 'template_html', ''),
                 "logo_b64": getattr(last, 'logo_b64', None),
+                "rendered_path": last.image_path,
             }
 
 
@@ -787,6 +806,7 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
                 "client": client_name,
                 "template_html": result.template_html,
                 "logo_b64": result.logo_b64,
+                "rendered_path": result.image_path,
             }
             if user_id not in _previous_decisions:
                 _previous_decisions[user_id] = []
@@ -946,6 +966,7 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
             "client": client_name,
             "template_html": template_html,
             "logo_b64": logo_b64,
+            "rendered_path": render_result.final_image_path,
         }
         _add_to_history(user_id, "assistant", result_text[:300])
 
@@ -1005,6 +1026,7 @@ async def _handle_reimage(msg, text: str, user_id: int) -> None:
             "client": client_name,
             "template_html": template_html,
             "logo_b64": logo_b64,
+            "rendered_path": render_result.final_image_path,
         }
         _add_to_history(user_id, "assistant", result_text[:300])
 
