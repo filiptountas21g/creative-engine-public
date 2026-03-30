@@ -33,6 +33,8 @@ from taste.template_builder import build_templates, format_templates_summary, lo
 from pipeline.types import PipelineInput
 from pipeline.orchestrator import run_pipeline, run_carousel, format_result_for_telegram
 from pipeline.steps.render import render as render_post
+from pipeline.steps.image_gen import generate_image
+from pipeline.steps.brain_read import brain_read
 from pipeline.steps.dynamic_template import save_liked_template, save_client_preference, get_client_preferences
 from pipeline.types import CreativeDecisions, ImageResult
 
@@ -100,6 +102,7 @@ Intents:
 3. "make" — user wants to generate a single NEW post from scratch. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post", "make a different one with a new concept", "κάνε μου ένα post".
 3b. "carousel" — user wants MULTIPLE posts with a cohesive look. Examples: "make a carousel of 6 posts for LMW", "create 4 posts same style", "make 6 slides for georgoulis", "do a series of posts", "κάνε μου ένα καρουσέλ", "φτιάξε 6 posts", "μπορείς να κάνεις καρουσέλ". ANY mention of "carousel", "καρουσέλ", "series", or multiple posts = carousel.
 4. "edit" — user wants to TWEAK the last generated post (move things, change colors, change font, resize, switch template). The image stays the same, only the layout/styling changes. Examples: "move the text inside the picture", "make the headline bigger", "change the background to white", "use a different template", "swap the font", "put the text on the right side", "βάλε το κείμενο μέσα στην εικόνα".
+4b. "reimage" — user wants to REPLACE THE PHOTO/IMAGE in the last post while keeping the design. Examples: "replace the photo", "change the picture", "use a stock photo instead", "find a different image", "swap the image", "try another photo", "αλλαξε την εικόνα", "βάλε άλλη φωτογραφία", "use a real photo". This is NOT "edit" — edit changes CSS/layout, reimage changes the actual hero image.
 5. "like" — user approves/loves the last generated post. May ALSO ask for a new one in the same message. Examples: "I love this", "this is great", "perfect", "i really like it", "αυτό μου αρέσει", "μου αρέσει πολύ". If the message ONLY expresses approval with no request for a new post, return "like". If it ALSO asks for a new post (e.g. "μου αρέσει, κάνε μου ένα ακόμα" / "i love it can you make me another one"), return "like_and_make". If it asks for a carousel too, return "carousel".
 6. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
 7. "chat" — ONLY for greetings, general questions, or things that don't fit any other intent. Examples: "hey", "how does this work", "γεια", "μιλάς ελληνικά".
@@ -131,7 +134,7 @@ def _route_intent(text: str, has_analysis: bool, user_id: int = 0) -> str:
             messages=[{"role": "user", "content": text}],
         )
         intent = response.content[0].text.strip().lower().replace(" ", "_").split()[0]
-        if intent in ("feedback", "taste", "make", "carousel", "edit", "like", "like_and_make", "templates", "chat"):
+        if intent in ("feedback", "taste", "make", "carousel", "edit", "reimage", "like", "like_and_make", "templates", "chat"):
             return intent
         return "feedback" if has_analysis else "chat"
     except Exception:
@@ -459,6 +462,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             _add_to_history(user_id, "assistant", "No recent post to edit.")
         return
 
+    # ── REIMAGE ──────────────────────────────────────────
+    if intent == "reimage":
+        if user_id in _last_post_by_user:
+            await _handle_reimage(msg, text, user_id)
+        else:
+            await msg.reply_text("🤷 I don't have a recent post to reimage. Make one first!")
+            _add_to_history(user_id, "assistant", "No recent post to reimage.")
+        return
+
     # ── TEMPLATES ────────────────────────────────────────
     if intent == "templates":
         await _handle_templates(msg, text)
@@ -680,7 +692,10 @@ async def _handle_carousel(msg, text: str, user_id: int = 0) -> None:
             _last_post_by_user[user_id] = {
                 "decisions": last.decisions,
                 "image": last.hero_image,
+                "concept": last.concept,
                 "client": client_name,
+                "template_html": getattr(last, 'template_html', ''),
+                "logo_b64": getattr(last, 'logo_b64', None),
             }
 
 
@@ -768,6 +783,7 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
             _last_post_by_user[user_id] = {
                 "decisions": result.decisions,
                 "image": result.hero_image,
+                "concept": result.concept,
                 "client": client_name,
                 "template_html": result.template_html,
                 "logo_b64": result.logo_b64,
@@ -926,6 +942,7 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
         _last_post_by_user[user_id] = {
             "decisions": new_decisions,
             "image": image,
+            "concept": post_data.get("concept"),
             "client": client_name,
             "template_html": template_html,
             "logo_b64": logo_b64,
@@ -936,6 +953,65 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
         logger.error(f"Edit failed: {e}")
         await status_msg.edit_text(f"❌ Edit failed: {str(e)[:200]}")
         _add_to_history(user_id, "assistant", f"Edit failed: {str(e)[:100]}")
+
+
+async def _handle_reimage(msg, text: str, user_id: int) -> None:
+    """Replace the hero image in the last post while keeping all design decisions."""
+    post_data = _last_post_by_user[user_id]
+    decisions = post_data["decisions"]
+    concept = post_data.get("concept")
+    client_name = post_data["client"]
+    template_html = post_data.get("template_html")
+    logo_b64 = post_data.get("logo_b64")
+
+    if not concept:
+        await msg.reply_text("⚠️ No concept stored from the last post — try generating a new one.")
+        return
+
+    status_msg = await msg.reply_text("🔄 Finding a new image for this concept...")
+
+    try:
+        # Re-read brain context for taste data
+        pipeline_input = PipelineInput(client=client_name, brief=concept.object)
+        brain_ctx = await brain_read(pipeline_input, brain)
+
+        # Generate a new image using the same concept
+        new_image = await generate_image(concept, brain_ctx)
+        await status_msg.edit_text(f"🖼️ Got new image ({new_image.model_used}), re-rendering...")
+
+        # Re-render with new image + same template + same decisions
+        render_result = await render_post(
+            decisions, new_image, client_name,
+            dynamic_html=template_html, logo_b64=logo_b64,
+        )
+
+        result_text = (
+            f"✅ Image replaced for {client_name}\n\n"
+            f"🖼️ New image: {new_image.model_used}\n"
+            f"📐 Layout unchanged"
+        )
+
+        img_path = Path(render_result.final_image_path)
+        await msg.reply_photo(
+            photo=open(img_path, "rb"),
+            caption=result_text[:1024],
+        )
+
+        # Update stored post with new image
+        _last_post_by_user[user_id] = {
+            "decisions": decisions,
+            "image": new_image,
+            "concept": concept,
+            "client": client_name,
+            "template_html": template_html,
+            "logo_b64": logo_b64,
+        }
+        _add_to_history(user_id, "assistant", result_text[:300])
+
+    except Exception as e:
+        logger.error(f"Reimage failed: {e}")
+        await status_msg.edit_text(f"❌ Image replacement failed: {str(e)[:200]}")
+        _add_to_history(user_id, "assistant", f"Reimage failed: {str(e)[:100]}")
 
 
 async def _handle_templates(msg, text: str) -> None:
