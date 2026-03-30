@@ -812,13 +812,19 @@ Available fields you can change:
 - "headline_max_width": CSS value (e.g. "75%", "90%", "50%")
 - "image_padding": pixels around image (0-200)
 
+IMPORTANT: Only change the MINIMUM number of fields needed. If user says "make headline bigger",
+ONLY return {"font_headline_size": 85}. Do NOT change template, colors, or anything else.
+Changing the template is EXPENSIVE (full regeneration) — only do it if the user explicitly asks
+for a different layout structure.
+
 Common requests and what to change:
-- "move text inside the picture" → template: "full-bleed" (text overlays on image)
 - "make headline bigger" → font_headline_size: increase by 15-20px
+- "make logo bigger" → This is a CSS change, not in the decisions. Return {"logo_scale": 1.5} (multiply current size)
 - "change background to white" → color_bg: "#FFFFFF"
 - "more minimal" → increase image_padding, reduce font_headline_size
-- "put text on the right" → template: "split" with adjustments
-- "text over the image" → template: "full-bleed"
+- "move text inside the picture" → template: "full-bleed" (ONLY if user explicitly wants this)
+- "put text on the right" → template: "split" (ONLY if layout must change)
+- "text over the image" → template: "full-bleed" (ONLY if layout must change)
 
 Return ONLY valid JSON with the changes. No explanation."""
 
@@ -888,6 +894,12 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
         # Reuse the SAME template HTML and logo from the original post
         template_html = post_data.get("template_html")
         logo_b64 = post_data.get("logo_b64")
+
+        # If template type changed, we need new HTML — can't reuse split HTML for full-bleed
+        if "template" in changes and changes["template"] != decisions.template:
+            from pipeline.steps.dynamic_template import generate_dynamic_template
+            logger.info(f"[edit] Template changed {decisions.template} → {changes['template']}, regenerating HTML")
+            template_html = await generate_dynamic_template(new_decisions, brain, has_logo=logo_b64 is not None)
 
         # Re-render with same template + same image, just updated decisions
         render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64)
