@@ -167,7 +167,7 @@ class Brain:
         params = []
 
         if client:
-            conditions.append("(client = ? OR client = 'ALL')")
+            conditions.append("(LOWER(client) = LOWER(?) OR client = 'ALL')")
             params.append(client)
         if topic:
             conditions.append("topic = ?")
