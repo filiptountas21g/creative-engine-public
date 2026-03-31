@@ -101,14 +101,17 @@ Intents:
 2. "taste" — user asks about their taste profile or what the system has learned. Examples: "what's my taste", "show me my preferences", "τι γούστο", "what have you learned about my style".
 3. "make" — user wants to generate a single NEW post from scratch. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post", "make a different one with a new concept", "κάνε μου ένα post".
 3b. "carousel" — user wants MULTIPLE posts with a cohesive look. Examples: "make a carousel of 6 posts for LMW", "create 4 posts same style", "make 6 slides for georgoulis", "do a series of posts", "κάνε μου ένα καρουσέλ", "φτιάξε 6 posts", "μπορείς να κάνεις καρουσέλ". ANY mention of "carousel", "καρουσέλ", "series", or multiple posts = carousel.
-4. "edit" — user wants to TWEAK the last generated post (move things, change colors, change font, resize, switch template). The image stays the same, only the layout/styling changes. Examples: "move the text inside the picture", "make the headline bigger", "change the background to white", "use a different template", "swap the font", "put the text on the right side", "βάλε το κείμενο μέσα στην εικόνα".
+4. "edit" — user wants to TWEAK or MODIFY the last generated post. This includes: moving things, changing colors/fonts/sizes, switching template, changing text, translating text. CRITICAL: "make the same one but in greek/english", "same design but change the text", "translate it", "κάνε το ίδιο αλλά στα ελληνικά" = EDIT (not make!). If the user references "the same one" or wants to modify the EXISTING post, it's edit. Examples: "move the text inside the picture", "make the headline bigger", "change the background to white", "make the same but in greek", "translate the text to greek", "same design different text", "βάλε το κείμενο μέσα στην εικόνα".
 4b. "reimage" — user wants to REPLACE THE PHOTO/IMAGE in the last post while keeping the design. Examples: "replace the photo", "change the picture", "use a stock photo instead", "find a different image", "swap the image", "try another photo", "αλλαξε την εικόνα", "βάλε άλλη φωτογραφία", "use a real photo". This is NOT "edit" — edit changes CSS/layout, reimage changes the actual hero image.
 5. "like" — user approves/loves the last generated post. May ALSO ask for a new one in the same message. Examples: "I love this", "this is great", "perfect", "i really like it", "αυτό μου αρέσει", "μου αρέσει πολύ". If the message ONLY expresses approval with no request for a new post, return "like". If it ALSO asks for a new post (e.g. "μου αρέσει, κάνε μου ένα ακόμα" / "i love it can you make me another one"), return "like_and_make". If it asks for a carousel too, return "carousel".
 6. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
 7. "resend" — user asks to see or receive the last generated post again. Examples: "send it to me", "show me", "send it", "δειξε μου", "στείλε μου το", "show me the post", "can I see it". Only if there IS a recent post.
 8. "chat" — ONLY for greetings, general questions, or things that don't fit any other intent. Examples: "hey", "how does this work", "γεια", "μιλάς ελληνικά".
 
-IMPORTANT: If the message contains BOTH approval AND a request (like "μου αρέσει, κάνε μου καρουσέλ"), prioritize the ACTION intent (carousel > like_and_make > like).
+IMPORTANT RULES:
+- If the message contains BOTH approval AND a request (like "μου αρέσει, κάνε μου καρουσέλ"), prioritize the ACTION intent (carousel > like_and_make > like).
+- If the user says "make the same" or "same one but..." or "same design" and there IS a recent post, this is "edit" NOT "make". They want to modify the existing post, not create from scratch.
+- "make" means a BRAND NEW post with a new concept. "edit" means change something about the EXISTING post.
 
 Has recent analysis: {has_analysis}
 Has recent post: {has_post}
@@ -867,6 +870,9 @@ Common requests and what to change:
 - "move text inside the picture" → template: "full-bleed" (ONLY if user explicitly wants this)
 - "put text on the right" → template: "split" (ONLY if layout must change)
 - "text over the image" → template: "full-bleed" (ONLY if layout must change)
+- "make it in greek" / "translate to greek" → change headline, subtext, AND cta to Greek translations. Keep the same meaning and tone.
+- "make it in english" / "translate to english" → change headline, subtext, AND cta to English translations.
+- "same but different text" → rewrite headline/subtext/cta with similar meaning but different wording.
 
 Return ONLY valid JSON with the changes. No explanation."""
 
