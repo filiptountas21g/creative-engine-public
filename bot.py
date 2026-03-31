@@ -3,17 +3,18 @@ Lectus Creative Engine — Telegram Bot
 
 No commands. Just talk naturally.
 Send photos → AI learns your taste.
-Ask for anything → Claude routes it.
+Ask for anything → Claude decides what to do using tool-use.
 """
 
 import asyncio
 import json
 import logging
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Update
+from telegram import Update, InputMediaPhoto
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -35,7 +36,10 @@ from pipeline.orchestrator import run_pipeline, run_carousel, format_result_for_
 from pipeline.steps.render import render as render_post
 from pipeline.steps.image_gen import generate_image
 from pipeline.steps.brain_read import brain_read
-from pipeline.steps.dynamic_template import save_liked_template, save_client_preference, get_client_preferences
+from pipeline.steps.dynamic_template import (
+    save_liked_template, save_client_preference,
+    get_client_preferences, generate_dynamic_template,
+)
 from pipeline.types import CreativeDecisions, ImageResult
 
 # ── Logging ────────────────────────────────────────────────
@@ -55,94 +59,282 @@ _ai_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 _last_analysis_by_user: dict[int, dict] = {}
 _analysis_by_msg: dict[int, dict] = {}
 
-# Conversation history per user (last N messages for context)
-MAX_HISTORY = 15
+# Conversation history per user — stores full API message objects for tool-use
+MAX_HISTORY = 20
 _chat_history: dict[int, list[dict]] = {}
 
 # Track last pipeline result per user for edits
-_last_post_by_user: dict[int, dict] = {}  # {decisions, image, client, template_html, logo_b64}
+_last_post_by_user: dict[int, dict] = {}
 
 # Track previous decisions per user for variety
 _previous_decisions: dict[int, list[dict]] = {}
 
 
-def _add_to_history(user_id: int, role: str, content: str):
-    """Add a message to user's conversation history."""
+def _add_to_history(user_id: int, role: str, content):
+    """Add a message to user's conversation history.
+    Content can be a string or a list of content blocks (for tool_use)."""
     if user_id not in _chat_history:
         _chat_history[user_id] = []
     _chat_history[user_id].append({"role": role, "content": content})
-    # Keep only last N messages
-    if len(_chat_history[user_id]) > MAX_HISTORY:
-        _chat_history[user_id] = _chat_history[user_id][-MAX_HISTORY:]
+    # Trim but never split tool_use/tool_result pairs
+    _trim_history(user_id)
 
 
-def _get_history_text(user_id: int) -> str:
-    """Get conversation history formatted for Claude context."""
-    history = _chat_history.get(user_id, [])
-    if not history:
-        return ""
-    lines = []
-    for msg in history:
-        prefix = "You" if msg["role"] == "user" else "Bot"
-        # Truncate long messages to save tokens
-        text = msg["content"][:300]
-        if len(msg["content"]) > 300:
-            text += "..."
-        lines.append(f"{prefix}: {text}")
-    return "\n".join(lines)
+def _trim_history(user_id: int):
+    """Trim history to MAX_HISTORY, never splitting tool_use from tool_result."""
+    hist = _chat_history.get(user_id, [])
+    if len(hist) <= MAX_HISTORY:
+        return
+    # Find the safest trim point: skip forward until we're not in a tool_result
+    trim_to = len(hist) - MAX_HISTORY
+    while trim_to < len(hist):
+        msg = hist[trim_to]
+        # Don't start on a tool_result (it needs the preceding assistant tool_use)
+        if msg["role"] == "user" and isinstance(msg.get("content"), list):
+            # Check if it's a tool_result block
+            if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in msg["content"]):
+                trim_to += 1
+                continue
+        break
+    _chat_history[user_id] = hist[trim_to:]
 
 
-# ── Intent Router ─────────────────────────────────────────
-
-ROUTER_PROMPT = """You classify user messages for a creative design bot. The user feeds inspiration images and generates social media posts. The user speaks both English and Greek — understand both.
-
-Intents:
-1. "feedback" — user is responding to a taste analysis (confirming, correcting, directing). Examples: "correct", "σωστά", "remove the lime", "not this", "i like the colors but not the font", "more editorial".
-2. "taste" — user asks about their taste profile or what the system has learned. Examples: "what's my taste", "show me my preferences", "τι γούστο", "what have you learned about my style".
-3. "make" — user wants to generate a single NEW post from scratch. Examples: "make a post for Somamed", "generate something for LMW", "create a linkedin post", "φτιάξε ένα post", "make a different one with a new concept", "κάνε μου ένα post".
-3b. "carousel" — user wants MULTIPLE posts with a cohesive look. Examples: "make a carousel of 6 posts for LMW", "create 4 posts same style", "make 6 slides for georgoulis", "do a series of posts", "κάνε μου ένα καρουσέλ", "φτιάξε 6 posts", "μπορείς να κάνεις καρουσέλ". ANY mention of "carousel", "καρουσέλ", "series", or multiple posts = carousel.
-4. "edit" — user wants to TWEAK or MODIFY the last generated post. This includes: moving things, changing colors/fonts/sizes, switching template, changing text, translating text. CRITICAL: "make the same one but in greek/english", "same design but change the text", "translate it", "κάνε το ίδιο αλλά στα ελληνικά" = EDIT (not make!). If the user references "the same one" or wants to modify the EXISTING post, it's edit. Examples: "move the text inside the picture", "make the headline bigger", "change the background to white", "make the same but in greek", "translate the text to greek", "same design different text", "βάλε το κείμενο μέσα στην εικόνα".
-4b. "reimage" — user wants to REPLACE THE PHOTO/IMAGE in the last post while keeping the design. Examples: "replace the photo", "change the picture", "use a stock photo instead", "find a different image", "swap the image", "try another photo", "αλλαξε την εικόνα", "βάλε άλλη φωτογραφία", "use a real photo". This is NOT "edit" — edit changes CSS/layout, reimage changes the actual hero image.
-5. "like" — user approves/loves the last generated post. May ALSO ask for a new one in the same message. Examples: "I love this", "this is great", "perfect", "i really like it", "αυτό μου αρέσει", "μου αρέσει πολύ". If the message ONLY expresses approval with no request for a new post, return "like". If it ALSO asks for a new post (e.g. "μου αρέσει, κάνε μου ένα ακόμα" / "i love it can you make me another one"), return "like_and_make". If it asks for a carousel too, return "carousel".
-6. "templates" — user asks about templates or wants to rebuild them. Examples: "show templates", "rebuild templates", "regenerate templates", "what templates do I have".
-7. "resend" — user asks to see or receive the last generated post again. Examples: "send it to me", "show me", "send it", "δειξε μου", "στείλε μου το", "show me the post", "can I see it". Only if there IS a recent post.
-8. "chat" — ONLY for greetings, general questions, or things that don't fit any other intent. Examples: "hey", "how does this work", "γεια", "μιλάς ελληνικά".
-
-IMPORTANT RULES:
-- If the message contains BOTH approval AND a request (like "μου αρέσει, κάνε μου καρουσέλ"), prioritize the ACTION intent (carousel > like_and_make > like).
-- If the user says "make the same" or "same one but..." or "same design" and there IS a recent post, this is "edit" NOT "make". They want to modify the existing post, not create from scratch.
-- "make" means a BRAND NEW post with a new concept. "edit" means change something about the EXISTING post.
-
-Has recent analysis: {has_analysis}
-Has recent post: {has_post}
-
-Recent conversation:
-{history}
-
-Return ONLY the intent word. Nothing else."""
+def _get_history_for_api(user_id: int) -> list[dict]:
+    """Get conversation history formatted for the Anthropic API.
+    Returns the messages list, ensuring it starts with 'user' role."""
+    hist = _chat_history.get(user_id, [])
+    if not hist:
+        return []
+    # Ensure starts with user message
+    start = 0
+    for i, msg in enumerate(hist):
+        if msg["role"] == "user":
+            start = i
+            break
+    return hist[start:]
 
 
-def _route_intent(text: str, has_analysis: bool, user_id: int = 0) -> str:
-    """Quick Sonnet call to route intent."""
-    history = _get_history_text(user_id) or "(no previous messages)"
+# ── Tool Definitions ──────────────────────────────────────
+
+TOOLS = [
+    {
+        "name": "generate_post",
+        "description": (
+            "Generate a brand new social media post from scratch with a new concept and image. "
+            "Use ONLY when the user wants something completely new — a new idea, new concept, new design. "
+            "Do NOT use this for modifications to an existing post (use edit_post instead)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "client": {
+                    "type": "string",
+                    "description": "Client/brand name (e.g. 'LMW', 'Georgoulis', 'Somamed'). Use 'ALL' if not specified.",
+                },
+                "brief": {
+                    "type": "string",
+                    "description": "Creative direction, theme, or topic for the post. Be specific.",
+                },
+                "platform": {
+                    "type": "string",
+                    "enum": ["linkedin", "instagram", "facebook"],
+                    "description": "Social media platform. Default: linkedin",
+                },
+            },
+            "required": ["client", "brief"],
+        },
+    },
+    {
+        "name": "generate_carousel",
+        "description": (
+            "Generate multiple cohesive posts as a carousel/series with the same design language. "
+            "Use when the user asks for multiple posts, a carousel, a series, or slides."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "client": {"type": "string", "description": "Client/brand name"},
+                "brief": {"type": "string", "description": "Theme/direction for the carousel"},
+                "count": {
+                    "type": "integer",
+                    "description": "Number of posts (default 6, max 10)",
+                    "minimum": 2,
+                    "maximum": 10,
+                },
+                "platform": {
+                    "type": "string",
+                    "enum": ["linkedin", "instagram", "facebook"],
+                },
+            },
+            "required": ["client", "brief"],
+        },
+    },
+    {
+        "name": "edit_post",
+        "description": (
+            "Modify the last generated post — change text, colors, fonts, sizes, layout, translate text, "
+            "add/remove logo. The hero image stays the same. Use for ANY tweak to the existing post: "
+            "translating, restyling, changing text, adjusting layout. "
+            "IMPORTANT: Only include fields that need to change."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "headline": {"type": "string", "description": "New headline text (change for translation or rewording)"},
+                "subtext": {"type": "string", "description": "New supporting text"},
+                "cta": {"type": "string", "description": "New call-to-action text"},
+                "template": {
+                    "type": "string",
+                    "enum": ["object-hero", "text-dominant", "split", "full-bleed"],
+                    "description": "Layout template. Only change if user explicitly wants different layout.",
+                },
+                "font_headline": {"type": "string", "description": "Google Font name"},
+                "font_headline_weight": {"type": "integer", "description": "Font weight (400-900)"},
+                "font_headline_size": {"type": "integer", "description": "Font size in pixels (40-120)"},
+                "font_headline_tracking": {"type": "string", "description": "Letter spacing CSS value"},
+                "font_headline_case": {
+                    "type": "string",
+                    "enum": ["uppercase", "lowercase", "none"],
+                },
+                "color_bg": {"type": "string", "description": "Background color (hex)"},
+                "color_text": {"type": "string", "description": "Text color (hex)"},
+                "color_accent": {"type": "string", "description": "Accent color (hex)"},
+                "color_subtext": {"type": "string", "description": "Subtext color (hex)"},
+                "headline_margin_x": {"type": "integer", "description": "Horizontal margin (0-200px)"},
+                "headline_margin_y": {"type": "integer", "description": "Vertical margin (0-200px)"},
+                "headline_max_width": {"type": "string", "description": "Max width CSS (e.g. '75%')"},
+                "image_padding": {"type": "integer", "description": "Image padding (0-200px)"},
+                "add_logo": {"type": "boolean", "description": "Set true to add the client's logo"},
+                "remove_logo": {"type": "boolean", "description": "Set true to remove the logo"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "replace_image",
+        "description": (
+            "Replace the hero image in the last post while keeping all design decisions (font, colors, layout, text). "
+            "Searches for a new stock photo or generates a new AI image using the same concept. "
+            "Use when user says 'replace the photo', 'use a stock image', 'change the picture', etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "save_favorite",
+        "description": (
+            "Save the current post design as a favorite/liked template. Use when the user approves, "
+            "loves, or wants to save the current post. Can include modifications to save alongside."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "client": {"type": "string", "description": "Client to save for (overrides post's client)"},
+                "modifications": {
+                    "type": "object",
+                    "description": "Design tweaks to save (e.g. {'color_accent': '#FF6B00'})",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "process_feedback",
+        "description": (
+            "Process user feedback on the last taste analysis of an inspiration image. "
+            "Use when user confirms, corrects, or refines observations about a photo they sent."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "feedback_text": {"type": "string", "description": "The user's feedback on the analysis"},
+            },
+            "required": ["feedback_text"],
+        },
+    },
+    {
+        "name": "get_taste_profile",
+        "description": (
+            "Show what the system has learned about the user's design taste and preferences. "
+            "Use when user asks about their taste, style, preferences."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "manage_templates",
+        "description": "Show existing templates or rebuild them from taste data.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["show", "rebuild"],
+                    "description": "'show' to list templates, 'rebuild' to regenerate from taste",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "resend_last_post",
+        "description": "Re-send the last generated post image. Use when user says 'send it', 'show me', etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+]
+
+
+# ── System Prompt Builder ─────────────────────────────────
+
+def _build_system_prompt(user_id: int) -> str:
+    """Build the system prompt with current state context."""
+    has_analysis = user_id in _last_analysis_by_user
     has_post = user_id in _last_post_by_user
-    try:
-        response = _ai_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=10,
-            system=ROUTER_PROMPT.format(
-                has_analysis=has_analysis,
-                has_post=has_post,
-                history=history,
-            ),
-            messages=[{"role": "user", "content": text}],
+    post_data = _last_post_by_user.get(user_id, {})
+
+    post_context = ""
+    if has_post and post_data.get("decisions"):
+        d = post_data["decisions"]
+        post_context = (
+            f"\nLast post details:\n"
+            f"  Client: {post_data.get('client', '?')}\n"
+            f"  Headline: {d.headline}\n"
+            f"  Subtext: {d.subtext}\n"
+            f"  CTA: {d.cta}\n"
+            f"  Template: {d.template}\n"
+            f"  Font: {d.font_headline} ({d.font_headline_weight})\n"
+            f"  Colors: bg={d.color_bg}, text={d.color_text}, accent={d.color_accent}\n"
+            f"  Has logo: {'yes' if post_data.get('logo_b64') else 'no'}\n"
         )
-        intent = response.content[0].text.strip().lower().replace(" ", "_").split()[0]
-        if intent in ("feedback", "taste", "make", "carousel", "edit", "reimage", "like", "like_and_make", "templates", "resend", "chat"):
-            return intent
-        return "feedback" if has_analysis else "chat"
-    except Exception:
-        return "feedback" if has_analysis else "chat"
+
+    return f"""You are John, a creative design assistant for Lectus Creative Engine.
+You help Filip create social media posts, learn his design taste, and manage templates.
+You speak naturally in whatever language the user speaks (Greek or English).
+Keep responses SHORT and conversational — 1-2 sentences. Don't over-explain.
+
+State:
+- Has recent taste analysis: {has_analysis}
+- Has recent post: {has_post}
+{post_context}
+Rules:
+- If user wants to modify the EXISTING post (translate, change text, adjust colors, etc.), use edit_post.
+  "Make the same but in greek" = edit_post with translated text, NOT generate_post.
+- If user wants a completely NEW concept/design, use generate_post.
+- You can call multiple tools in sequence. E.g. "I love it, make me another one" → save_favorite then generate_post.
+- For edit_post, YOU decide the exact field values. Don't ask the user for hex codes — just pick good ones.
+- When translating, translate headline, subtext, AND cta. Keep the same tone and meaning.
+- Only change the MINIMUM fields needed for edit_post.
+- If the user just wants to chat or says hi, respond naturally without calling any tools."""
 
 
 # ── Photo handler (taste ingestion + logo detection) ─────
@@ -155,7 +347,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     photo = msg.photo[-1]
     caption = msg.caption or ""
     user_id = msg.from_user.id if msg.from_user else 0
-    history = _get_history_text(user_id)
+    history_text = _get_history_text_simple(user_id)
 
     status_msg = await msg.reply_text("🔍 Looking at this...")
 
@@ -166,7 +358,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await file.download_to_drive(str(tmp_path))
 
         # Step 1: Claude classifies what this image is
-        image_intent = await _classify_image(tmp_path, caption, history)
+        image_intent = await _classify_image(tmp_path, caption, history_text)
         logger.info(f"[photo] classified as: {image_intent}")
 
         if image_intent.get("type") == "logo":
@@ -202,20 +394,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if len(analysis_text) <= 4000:
             reply = await msg.reply_text(analysis_text, parse_mode="HTML")
         else:
-            chunks = []
-            remaining = analysis_text
-            while remaining:
-                if len(remaining) <= 4000:
-                    chunks.append(remaining)
-                    break
-                split_at = remaining.rfind("\n\n", 0, 4000)
-                if split_at == -1:
-                    split_at = remaining.rfind("\n", 0, 4000)
-                if split_at == -1:
-                    split_at = 4000
-                chunks.append(remaining[:split_at])
-                remaining = remaining[split_at:].strip()
-
+            chunks = [analysis_text[i:i + 4000] for i in range(0, len(analysis_text), 4000)]
             for chunk in chunks:
                 reply = await msg.reply_text(chunk, parse_mode="HTML")
 
@@ -223,73 +402,63 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             _analysis_by_msg[reply.message_id] = analysis
         _last_analysis_by_user[user_id] = analysis
         _add_to_history(user_id, "user", f"[sent inspiration photo] {caption}")
-        _add_to_history(user_id, "assistant", f"[analyzed image: {analysis.get('feeling', {}).get('mood', '?')} mood, {analysis.get('composition', {}).get('template_match', '?')} layout]")
+        _add_to_history(user_id, "assistant", analysis_text[:300])
 
     except Exception as e:
         logger.error(f"Photo analysis failed: {e}")
-        try:
-            await msg.reply_text(f"❌ Analysis failed: {str(e)[:200]}")
-        except Exception:
-            pass
-    finally:
-        try:
-            tmp_path.unlink()
-        except Exception:
-            pass
+        await status_msg.edit_text(f"❌ Analysis failed: {str(e)[:200]}")
+
+
+def _get_history_text_simple(user_id: int) -> str:
+    """Get a simple text summary of history for non-API uses (photo handler etc)."""
+    hist = _chat_history.get(user_id, [])
+    lines = []
+    for msg in hist[-10:]:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            text = content[:200]
+        elif isinstance(content, list):
+            # Extract text from content blocks
+            texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+            text = " ".join(texts)[:200]
+        else:
+            text = str(content)[:200]
+        prefix = "User" if msg["role"] == "user" else "Bot"
+        lines.append(f"{prefix}: {text}")
+    return "\n".join(lines)
 
 
 async def _classify_image(image_path: Path, caption: str, history: str) -> dict:
-    """Use Claude Vision to classify an uploaded image: logo, brand asset, or inspiration."""
-    import base64
-
+    """Use Claude Vision to classify if an image is a logo or inspiration."""
     img_bytes = image_path.read_bytes()
+    import base64
     img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-
-    # Detect media type
     suffix = image_path.suffix.lower()
-    media_type = "image/jpeg"
-    if suffix == ".png":
-        media_type = "image/png"
-    elif suffix in (".webp",):
-        media_type = "image/webp"
+    media = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
 
     try:
         response = _ai_client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=200,
+            system=(
+                "You classify images sent to a design bot. Is this a LOGO/brand asset or INSPIRATION (design reference)?\n\n"
+                "Consider the caption and conversation history for context.\n"
+                "Return JSON: {\"type\": \"logo\" or \"inspiration\", \"client\": \"ClientName\" or null, \"reason\": \"brief reason\"}\n"
+                "Only return \"logo\" if the image is clearly a logo, icon, or brand mark.\n"
+                f"Caption: {caption}\nRecent conversation:\n{history}\n\n"
+                "Return ONLY JSON."
+            ),
             messages=[{
                 "role": "user",
                 "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Look at this image and the user's caption/context. Classify it:\n\n"
-                            f"Caption: '{caption}'\n"
-                            f"Recent conversation:\n{history}\n\n"
-                            "Is this:\n"
-                            "1. 'logo' — a company logo, brand mark, icon, or brand asset the user wants saved\n"
-                            "2. 'inspiration' — a design reference, post example, or aesthetic inspiration\n\n"
-                            "Also extract the client/brand name if mentioned.\n\n"
-                            'Return ONLY JSON: {"type": "logo" or "inspiration", "client": "BrandName" or null, "reason": "brief reason"}'
-                        ),
-                    },
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": img_b64,
-                        },
-                    },
+                    {"type": "image", "source": {"type": "base64", "media_type": media, "data": img_b64}},
+                    {"type": "text", "text": f"Classify this image. Caption: {caption}"},
                 ],
             }],
         )
         raw = response.content[0].text.strip()
         if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-            raw = raw.strip()
+            raw = raw.split("\n", 1)[1].rstrip("`").strip()
         return json.loads(raw)
     except Exception as e:
         logger.warning(f"Image classification failed: {e}")
@@ -351,416 +520,43 @@ def _extract_client_from_caption(caption: str) -> str | None:
     return None
 
 
-# ── Text handler (Claude routes everything) ──────────────
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.message
-    if not msg or not msg.text:
-        return
+# ── Tool Execution ────────────────────────────────────────
 
-    text = msg.text.strip()
-    user_id = msg.from_user.id if msg.from_user else 0
+async def _execute_tool(tool_name: str, tool_input: dict, user_id: int, msg) -> str:
+    """Execute a tool and return a result string for Claude."""
+    logger.info(f"[tool] Executing {tool_name} with {json.dumps(tool_input, ensure_ascii=False)[:200]}")
 
-    # Check if replying to an analysis
-    original_analysis = None
-    if msg.reply_to_message and msg.reply_to_message.message_id in _analysis_by_msg:
-        original_analysis = _analysis_by_msg[msg.reply_to_message.message_id]
-    elif user_id in _last_analysis_by_user:
-        original_analysis = _last_analysis_by_user[user_id]
-
-    has_analysis = original_analysis is not None
-
-    # Track user message in history
-    _add_to_history(user_id, "user", text)
-
-    # Route intent
-    intent = await asyncio.to_thread(_route_intent, text, has_analysis, user_id)
-    logger.info(f"[router] intent={intent} for: {text[:80]}")
-
-    # ── FEEDBACK ─────────────────────────────────────────
-    if intent == "feedback" and original_analysis:
-        status_msg = await msg.reply_text("📝 Processing your feedback...")
-        try:
-            feedback = await parse_feedback(
-                user_message=text,
-                original_analysis=original_analysis,
-                brain=brain,
-            )
-            response_text = format_feedback_response(feedback)
-            await status_msg.edit_text(response_text)
-            _add_to_history(user_id, "assistant", response_text)
-            if user_id in _last_analysis_by_user:
-                del _last_analysis_by_user[user_id]
-        except Exception as e:
-            logger.error(f"Feedback failed: {e}")
-            await status_msg.edit_text(f"❌ Failed: {str(e)[:200]}")
-        return
-
-    # ── TASTE ────────────────────────────────────────────
-    if intent == "taste":
-        try:
-            summary = await get_taste_summary(brain)
-            await msg.reply_text(summary, parse_mode="HTML")
-            _add_to_history(user_id, "assistant", summary[:300])
-        except Exception as e:
-            logger.error(f"Taste summary failed: {e}")
-            await msg.reply_text(f"❌ Failed: {str(e)[:200]}")
-        return
-
-    # ── MAKE ─────────────────────────────────────────────
-    if intent == "make":
-        await _handle_make(msg, text, user_id)
-        return
-
-    # ── CAROUSEL ───────────────────────────────────────────
-    if intent == "carousel":
-        await _handle_carousel(msg, text, user_id)
-        return
-
-    # ── LIKE / LIKE_AND_MAKE ──────────────────────────────
-    if intent in ("like", "like_and_make"):
-        if user_id in _last_post_by_user:
-            last = _last_post_by_user[user_id]
-            try:
-                # Use Sonnet to extract any modifications and client context
-                modifications, client_for_pref = await _extract_like_details(text, last)
-
-                concept_summary = ""
-                if hasattr(last.get("decisions"), "headline"):
-                    concept_summary = last["decisions"].headline
-
-                client_name = client_for_pref or last.get("client", "ALL")
-
-                await save_liked_template(
-                    brain=brain,
-                    decisions=last["decisions"],
-                    template_html="",
-                    concept_summary=concept_summary,
-                    client=client_name,
-                    modifications=modifications,
-                )
-
-                # If there are client-specific preferences, save them too
-                if modifications and client_name != "ALL":
-                    await save_client_preference(brain, client_name, modifications)
-
-                if modifications:
-                    changes = ", ".join(f"{k}: {v}" for k, v in modifications.items())
-                    await msg.reply_text(f"❤️ Saved with your changes ({changes}) for {client_name}!")
-                else:
-                    await msg.reply_text(f"❤️ Saved to favorites for {client_name}! I'll use this style more often.")
-                _add_to_history(user_id, "assistant", f"Saved to favorites for {client_name}.")
-            except Exception as e:
-                logger.error(f"Failed to save liked template: {e}")
-                await msg.reply_text("❤️ Noted!")
-
-        if intent == "like_and_make":
-            await _handle_make(msg, text, user_id)
-        return
-
-    # ── EDIT ──────────────────────────────────────────────
-    if intent == "edit":
-        if user_id in _last_post_by_user:
-            await _handle_edit(msg, text, user_id)
-        else:
-            await msg.reply_text("🤷 I don't have a recent post to edit. Make one first!")
-            _add_to_history(user_id, "assistant", "No recent post to edit.")
-        return
-
-    # ── REIMAGE ──────────────────────────────────────────
-    if intent == "reimage":
-        if user_id in _last_post_by_user:
-            await _handle_reimage(msg, text, user_id)
-        else:
-            await msg.reply_text("🤷 I don't have a recent post to reimage. Make one first!")
-            _add_to_history(user_id, "assistant", "No recent post to reimage.")
-        return
-
-    # ── RESEND ───────────────────────────────────────────
-    if intent == "resend":
-        if user_id in _last_post_by_user:
-            post_data = _last_post_by_user[user_id]
-            rendered = post_data.get("rendered_path")
-            if rendered and Path(rendered).exists():
-                await msg.reply_photo(
-                    photo=open(Path(rendered), "rb"),
-                    caption=f"📎 Last post for {post_data.get('client', '?')}",
-                )
-                _add_to_history(user_id, "assistant", "Re-sent last post.")
-            else:
-                await msg.reply_text("⚠️ The rendered file is no longer available. Try generating a new one.")
-        else:
-            await msg.reply_text("🤷 I don't have a recent post. Make one first!")
-        return
-
-    # ── TEMPLATES ────────────────────────────────────────
-    if intent == "templates":
-        await _handle_templates(msg, text)
-        return
-
-    # ── CHAT (default) ───────────────────────────────────
-    await _handle_chat(msg, text, user_id)
+    if tool_name == "generate_post":
+        return await _exec_generate_post(tool_input, user_id, msg)
+    elif tool_name == "generate_carousel":
+        return await _exec_generate_carousel(tool_input, user_id, msg)
+    elif tool_name == "edit_post":
+        return await _exec_edit_post(tool_input, user_id, msg)
+    elif tool_name == "replace_image":
+        return await _exec_replace_image(tool_input, user_id, msg)
+    elif tool_name == "save_favorite":
+        return await _exec_save_favorite(tool_input, user_id, msg)
+    elif tool_name == "process_feedback":
+        return await _exec_process_feedback(tool_input, user_id)
+    elif tool_name == "get_taste_profile":
+        return await _exec_get_taste(user_id, msg)
+    elif tool_name == "manage_templates":
+        return await _exec_manage_templates(tool_input, msg)
+    elif tool_name == "resend_last_post":
+        return await _exec_resend(user_id, msg)
+    else:
+        return f"Unknown tool: {tool_name}"
 
 
-async def _handle_chat(msg, text: str, user_id: int) -> None:
-    """Have a natural conversation using Claude with full history context."""
-    history = _chat_history.get(user_id, [])
-
-    # Build messages for Claude
-    system = (
-        "You are John, a creative design assistant for Lectus Creative Engine. "
-        "You help Filip create social media posts, learn his design taste, and manage templates. "
-        "You speak naturally in whatever language the user speaks (Greek or English). "
-        "Keep responses short and conversational — 2-3 sentences max.\n\n"
-        "Your capabilities:\n"
-        "- Generate posts: user says 'make a post for [client]'\n"
-        "- Generate carousels: user says 'make a carousel of 6 for [client]'\n"
-        "- Learn taste: user sends inspiration photos\n"
-        "- Edit posts: user says 'move the text', 'change the font', etc.\n"
-        "- Save favorites: user says 'I love this'\n"
-        "- Show taste: user asks about their preferences\n\n"
-        "If the user is asking for something you can do (make post, carousel, etc.), "
-        "gently guide them to phrase it so you can act on it. "
-        "Don't just dump a menu — have a real conversation."
-    )
-
-    messages = []
-    for h in history[-10:]:  # last 10 for context
-        messages.append({"role": h["role"], "content": h["content"]})
-    # Make sure last message is user
-    if not messages or messages[-1]["role"] != "user":
-        messages.append({"role": "user", "content": text})
-
-    try:
-        response = _ai_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=300,
-            system=system,
-            messages=messages,
-        )
-        bot_reply = response.content[0].text.strip()
-    except Exception as e:
-        logger.error(f"Chat failed: {e}")
-        bot_reply = "🎨 Hey! Send me a photo to learn your taste, or say 'make a post for [client]' to create something."
-
-    await msg.reply_text(bot_reply)
-    _add_to_history(user_id, "assistant", bot_reply)
-
-
-async def _extract_like_details(text: str, last_post: dict) -> tuple[dict | None, str | None]:
-    """Use Sonnet to extract modifications and client from a 'like' message.
-
-    Returns (modifications_dict, client_name) — both can be None.
-    Examples:
-      "I love it" → (None, None)
-      "I love it but use the orange of lmw" → ({"color_accent": "#FF6B00"}, "LMW")
-      "save this for georgoulis" → (None, "Georgoulis")
-    """
-    decisions = last_post.get("decisions")
-    if not decisions:
-        return None, None
-
-    try:
-        response = _ai_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=300,
-            system=(
-                "The user liked a generated post and may want to save it with modifications.\n"
-                "Extract any design changes they want AND which client this is for.\n\n"
-                f"Current post details:\n"
-                f"  Font: {decisions.font_headline}\n"
-                f"  Colors: bg={decisions.color_bg}, text={decisions.color_text}, accent={decisions.color_accent}\n"
-                f"  Template: {decisions.template}\n"
-                f"  Client: {last_post.get('client', 'ALL')}\n\n"
-                "Return JSON:\n"
-                '{"modifications": {"color_accent": "#hex", ...} or null, "client": "ClientName" or null}\n\n'
-                "Only include fields that the user explicitly wants changed.\n"
-                "If they mention a color by name (orange, blue, red), convert to a reasonable hex.\n"
-                "If they mention a client name, extract it. Otherwise null.\n"
-                "Return ONLY JSON."
-            ),
-            messages=[{"role": "user", "content": text}],
-        )
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-            raw = raw.strip()
-        data = json.loads(raw)
-        mods = data.get("modifications")
-        client = data.get("client")
-        return mods, client
-    except Exception as e:
-        logger.warning(f"Could not extract like details: {e}")
-        return None, None
-
-
-async def _handle_carousel(msg, text: str, user_id: int = 0) -> None:
-    """Parse carousel request and generate multiple cohesive posts."""
-    history = _get_history_text(user_id)
-
-    # Use Sonnet to extract client, brief, and count
-    try:
-        response = _ai_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=200,
-            system=(
-                "Extract client name, brief, count, and platform from a carousel request.\n"
-                f"Recent conversation:\n{history}\n\n"
-                'Return JSON: {"client": "name", "brief": "theme/direction", "count": 6, "platform": "linkedin"}\n'
-                "Default count is 6 if not specified. Default platform is linkedin."
-            ),
-            messages=[{"role": "user", "content": text}],
-        )
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-            raw = raw.strip()
-        params = json.loads(raw)
-    except Exception:
-        params = {"client": "ALL", "brief": text, "count": 6, "platform": "linkedin"}
-
+async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
+    """Generate a new post from scratch."""
     client_name = params.get("client", "ALL")
-    brief = params.get("brief", text)
-    count = min(params.get("count", 6), 10)  # cap at 10
-    platform = params.get("platform", "linkedin")
-
-    status_msg = await msg.reply_text(
-        f"🎠 Generating carousel of {count} posts for {client_name}...\n"
-        f"Theme: {brief}\n\n"
-        f"⏳ This takes {count * 45}-{count * 90} seconds. Same aesthetic, different concepts."
-    )
-
-    async def on_progress(step: str, progress_msg: str):
-        try:
-            emojis = {
-                "research": "🔍", "brain": "🧠", "concept": "💡",
-                "copy": "📝", "image": "📸", "decisions": "🎯",
-                "template": "📐", "render": "🖨️", "brain_write": "💾",
-                "carousel": "🎠",
-            }
-            emoji = emojis.get(step, "⏳")
-            await status_msg.edit_text(
-                f"🎠 Carousel for {client_name} ({count} posts)...\n\n{emoji} {progress_msg}",
-            )
-        except Exception:
-            pass
-
-    pipeline_input = PipelineInput(
-        client=client_name,
-        brief=brief,
-        platform=platform,
-    )
-
-    results = await run_carousel(pipeline_input, brain, count=count, on_progress=on_progress)
-
-    # Send all successful posts as album
-    from telegram import InputMediaPhoto
-    successful = [r for r in results if r.success and r.image_path]
-
-    if not successful:
-        await status_msg.edit_text("❌ Carousel generation failed. No posts were created.")
-        return
-
-    # Send as media group (album)
-    media = []
-    for i, r in enumerate(successful):
-        img_path = Path(r.image_path)
-        caption = ""
-        if i == 0:
-            # First image gets the summary caption
-            caption = f"🎠 Carousel for {client_name} ({len(successful)} posts)\n\nTheme: {brief}"
-        media.append(InputMediaPhoto(
-            media=open(img_path, "rb"),
-            caption=caption[:1024] if caption else None,
-        ))
-
-    try:
-        # Telegram allows max 10 photos in an album
-        await msg.reply_media_group(media=media)
-    except Exception as e:
-        logger.error(f"Failed to send album: {e}")
-        # Fallback: send individually
-        for r in successful:
-            try:
-                await msg.reply_photo(photo=open(Path(r.image_path), "rb"))
-            except Exception:
-                pass
-
-    # Send details summary
-    summary_lines = [f"🎠 <b>Carousel for {client_name}</b> — {len(successful)}/{count} posts\n"]
-    for i, r in enumerate(successful, 1):
-        if r.concept and r.decisions:
-            summary_lines.append(
-                f"<b>Slide {i}:</b> {r.decisions.headline}\n"
-                f"   <i>{r.concept.object[:60]}</i>"
-            )
-    summary = "\n".join(summary_lines)
-
-    try:
-        await msg.reply_text(summary, parse_mode="HTML")
-    except Exception:
-        await msg.reply_text(summary[:4000])
-
-    _add_to_history(user_id, "assistant", f"Generated carousel of {len(successful)} posts for {client_name}")
-
-    # Store last post for likes
-    if successful:
-        last = successful[-1]
-        if last.decisions and last.hero_image:
-            _last_post_by_user[user_id] = {
-                "decisions": last.decisions,
-                "image": last.hero_image,
-                "concept": last.concept,
-                "client": client_name,
-                "template_html": getattr(last, 'template_html', ''),
-                "logo_b64": getattr(last, 'logo_b64', None),
-                "rendered_path": last.image_path,
-            }
-
-
-async def _handle_make(msg, text: str, user_id: int = 0) -> None:
-    """Parse natural language make request and run pipeline."""
-    # Get conversation history for context
-    history = _get_history_text(user_id)
-
-    # Use Sonnet to extract client + brief from natural text (with conversation context)
-    try:
-        response = _ai_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=200,
-            system=(
-                "Extract the client name and brief from a post generation request. "
-                "You have access to the recent conversation history — if the user references "
-                "a previous post (e.g. 'make a different one', 'try again but more minimal', "
-                "'same client but different approach'), use the history to understand what they mean.\n\n"
-                f"Recent conversation:\n{history}\n\n"
-                "Return JSON: {\"client\": \"name\", \"brief\": \"the full brief including any context from history\", \"platform\": \"linkedin/instagram/facebook\"}\n"
-                "If the user asks for a variation, include in the brief what was done before AND what they want different.\n"
-                "If no platform specified, default to linkedin. If no client specified, use \"ALL\"."
-            ),
-            messages=[{"role": "user", "content": text}],
-        )
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-            raw = raw.strip()
-        params = json.loads(raw)
-    except Exception:
-        params = {"client": "ALL", "brief": text, "platform": "linkedin"}
-
-    client_name = params.get("client", "ALL")
-    brief = params.get("brief", text)
+    brief = params.get("brief", "creative post")
     platform = params.get("platform", "linkedin")
 
     status_msg = await msg.reply_text(
         f"🎨 Generating post for {client_name}...\n"
-        f"Brief: {brief}\n\n"
-        f"⏳ This takes 60-120 seconds.",
+        f"Brief: {brief}\n\n⏳ This takes 60-120 seconds.",
     )
 
     async def on_progress(step: str, progress_msg: str):
@@ -777,12 +573,7 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
         except Exception:
             pass
 
-    pipeline_input = PipelineInput(
-        client=client_name,
-        brief=brief,
-        platform=platform,
-    )
-
+    pipeline_input = PipelineInput(client=client_name, brief=brief, platform=platform)
     prev = _previous_decisions.get(user_id)
     result = await run_pipeline(pipeline_input, brain, on_progress=on_progress, previous_decisions=prev)
     result_text = format_result_for_telegram(result, pipeline_input)
@@ -800,7 +591,7 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
         except Exception as e:
             logger.error(f"Failed to send image: {e}")
             await msg.reply_text(result_text, parse_mode="HTML")
-        # Store for edits + track for variety
+
         if result.decisions and result.hero_image:
             _last_post_by_user[user_id] = {
                 "decisions": result.decisions,
@@ -820,65 +611,103 @@ async def _handle_make(msg, text: str, user_id: int = 0) -> None:
                 "color_text": result.decisions.color_text,
                 "color_accent": result.decisions.color_accent,
             })
-        # Track the result in conversation history
-        _add_to_history(user_id, "assistant", result_text[:500])
+        return f"Post generated for {client_name}. Image sent to user."
     else:
-        # Error messages may contain angle brackets from logs — don't use HTML parse
         await status_msg.edit_text(result_text)
-        _add_to_history(user_id, "assistant", result_text[:300])
+        return f"Post generation failed: {result.error}"
 
 
-EDIT_SYSTEM_PROMPT = """You edit the layout/styling of a social media post. You receive the current design decisions and a user request to change something.
+async def _exec_generate_carousel(params: dict, user_id: int, msg) -> str:
+    """Generate a carousel of cohesive posts."""
+    client_name = params.get("client", "ALL")
+    brief = params.get("brief", "creative carousel")
+    count = min(params.get("count", 6), 10)
+    platform = params.get("platform", "linkedin")
 
-Your job: return ONLY the fields that need to change as a JSON object. Leave out anything that stays the same.
+    status_msg = await msg.reply_text(
+        f"🎠 Generating carousel of {count} posts for {client_name}...\n"
+        f"Theme: {brief}\n\n⏳ This takes {count * 45}-{count * 90} seconds."
+    )
 
-Available fields you can change:
-- "template": one of "object-hero", "text-dominant", "split", "full-bleed"
-- "headline": the headline text
-- "subtext": the supporting text
-- "cta": call to action text
-- "font_headline": Google Font name (e.g. "Inter", "Space Grotesk", "Playfair Display")
-- "font_headline_weight": number (400, 500, 600, 700, 800, 900)
-- "font_headline_size": pixels (40-120)
-- "font_headline_tracking": CSS letter-spacing (e.g. "-0.02em", "0.05em")
-- "font_headline_case": "uppercase", "lowercase", "none"
-- "color_bg": hex color
-- "color_text": hex color
-- "color_accent": hex color
-- "color_subtext": hex color
-- "headline_margin_x": pixels from left edge (0-200)
-- "headline_margin_y": pixels from top/bottom (0-200)
-- "headline_max_width": CSS value (e.g. "75%", "90%", "50%")
-- "image_padding": pixels around image (0-200)
+    async def on_progress(step: str, progress_msg: str):
+        try:
+            emojis = {
+                "research": "🔍", "brain": "🧠", "concept": "💡",
+                "copy": "📝", "image": "📸", "decisions": "🎯",
+                "template": "📐", "render": "🖨️", "brain_write": "💾",
+                "carousel": "🎠",
+            }
+            emoji = emojis.get(step, "⏳")
+            await status_msg.edit_text(
+                f"🎠 Carousel for {client_name} ({count} posts)...\n\n{emoji} {progress_msg}",
+            )
+        except Exception:
+            pass
 
-IMPORTANT: Only change the MINIMUM number of fields needed. If user says "make headline bigger",
-ONLY return {"font_headline_size": 85}. Do NOT change template, colors, or anything else.
-Changing the template is EXPENSIVE (full regeneration) — only do it if the user explicitly asks
-for a different layout structure.
+    pipeline_input = PipelineInput(client=client_name, brief=brief, platform=platform)
+    results = await run_carousel(pipeline_input, brain, count=count, on_progress=on_progress)
+    successful = [r for r in results if r.success and r.image_path]
 
-Special actions (not CSS fields, but you can return them):
-- "add_logo": true — add the client's logo to the post (fetched from Brain)
-- "remove_logo": true — remove the logo from the post
+    if not successful:
+        await status_msg.edit_text("❌ Carousel generation failed.")
+        return "Carousel generation failed. No posts created."
 
-Common requests and what to change:
-- "make headline bigger" → font_headline_size: increase by 15-20px
-- "make logo bigger" → This is a CSS change, not in the decisions. Return {"logo_scale": 1.5} (multiply current size)
-- "add the logo" / "put the logo" → {"add_logo": true}
-- "remove the logo" → {"remove_logo": true}
-- "change background to white" → color_bg: "#FFFFFF"
-- "more minimal" → increase image_padding, reduce font_headline_size
-- "move text inside the picture" → template: "full-bleed" (ONLY if user explicitly wants this)
-- "put text on the right" → template: "split" (ONLY if layout must change)
-- "text over the image" → template: "full-bleed" (ONLY if layout must change)
-- "make it in greek" / "translate to greek" → change headline, subtext, AND cta to Greek translations. Keep the same meaning and tone.
-- "make it in english" / "translate to english" → change headline, subtext, AND cta to English translations.
-- "same but different text" → rewrite headline/subtext/cta with similar meaning but different wording.
+    media = []
+    for i, r in enumerate(successful):
+        img_path = Path(r.image_path)
+        caption = ""
+        if i == 0:
+            caption = f"🎠 Carousel for {client_name} ({len(successful)} posts)\n\nTheme: {brief}"
+        media.append(InputMediaPhoto(
+            media=open(img_path, "rb"),
+            caption=caption[:1024] if caption else None,
+        ))
 
-Return ONLY valid JSON with the changes. No explanation."""
+    try:
+        await msg.reply_media_group(media=media)
+    except Exception as e:
+        logger.error(f"Failed to send album: {e}")
+        for r in successful:
+            try:
+                await msg.reply_photo(photo=open(Path(r.image_path), "rb"))
+            except Exception:
+                pass
+
+    # Send details summary
+    summary_lines = [f"🎠 <b>Carousel for {client_name}</b> — {len(successful)}/{count} posts\n"]
+    for i, r in enumerate(successful, 1):
+        if r.concept and r.decisions:
+            summary_lines.append(
+                f"<b>Slide {i}:</b> {r.decisions.headline}\n"
+                f"   <i>{r.concept.object[:60]}</i>"
+            )
+    summary = "\n".join(summary_lines)
+    try:
+        await msg.reply_text(summary, parse_mode="HTML")
+    except Exception:
+        await msg.reply_text(summary[:4000])
+
+    if successful:
+        last = successful[-1]
+        if last.decisions and last.hero_image:
+            _last_post_by_user[user_id] = {
+                "decisions": last.decisions,
+                "image": last.hero_image,
+                "concept": last.concept,
+                "client": client_name,
+                "template_html": getattr(last, 'template_html', ''),
+                "logo_b64": getattr(last, 'logo_b64', None),
+                "rendered_path": last.image_path,
+            }
+
+    return f"Carousel of {len(successful)} posts generated for {client_name}. Images sent."
 
 
-async def _handle_edit(msg, text: str, user_id: int) -> None:
-    """Edit the last generated post by modifying decisions and re-rendering."""
+async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
+    """Edit the last generated post with the given changes."""
+    if user_id not in _last_post_by_user:
+        return "No recent post to edit. Generate one first."
+
     post_data = _last_post_by_user[user_id]
     decisions = post_data["decisions"]
     image = post_data["image"]
@@ -886,78 +715,28 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
 
     status_msg = await msg.reply_text("✏️ Editing your post...")
 
-    # Build current state for Claude
-    current_state = {
-        "template": decisions.template,
-        "headline": decisions.headline,
-        "subtext": decisions.subtext,
-        "cta": decisions.cta,
-        "font_headline": decisions.font_headline,
-        "font_headline_weight": decisions.font_headline_weight,
-        "font_headline_size": decisions.font_headline_size,
-        "font_headline_tracking": decisions.font_headline_tracking,
-        "font_headline_case": decisions.font_headline_case,
-        "color_bg": decisions.color_bg,
-        "color_text": decisions.color_text,
-        "color_accent": decisions.color_accent,
-        "color_subtext": decisions.color_subtext,
-        "headline_margin_x": decisions.headline_margin_x,
-        "headline_margin_y": decisions.headline_margin_y,
-        "headline_max_width": decisions.headline_max_width,
-        "image_padding": decisions.image_padding,
-    }
-
     try:
-        # Ask Claude what to change
-        response = await asyncio.to_thread(
-            _ai_client.messages.create,
-            model="claude-sonnet-4-20250514",
-            max_tokens=300,
-            system=EDIT_SYSTEM_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": (
-                f"Current design:\n{json.dumps(current_state, indent=2)}\n"
-                f"Has logo: {'yes' if post_data.get('logo_b64') else 'no'}\n\n"
-                f"User request: {text}"
-            ),
-            }],
-        )
-
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-            raw = raw.strip()
-
-        changes = json.loads(raw)
-        logger.info(f"[edit] Changes: {changes}")
-
         # Handle special actions
         logo_b64 = post_data.get("logo_b64")
         needs_template_regen = False
 
-        if changes.pop("add_logo", False):
+        if changes.pop("add_logo", None):
             from pipeline.orchestrator import _get_client_logo
             fetched_logo = _get_client_logo(brain, client_name)
             if fetched_logo:
                 logo_b64 = fetched_logo
-                needs_template_regen = True  # Need template with {{LOGO_PATH}}
+                needs_template_regen = True
                 logger.info(f"[edit] Adding logo for {client_name}")
             else:
                 await status_msg.edit_text(f"⚠️ No logo found for {client_name}. Send me the logo first!")
-                return
+                return f"No logo found for {client_name}."
 
-        if changes.pop("remove_logo", False):
+        if changes.pop("remove_logo", None):
             logo_b64 = None
             needs_template_regen = True
             logger.info(f"[edit] Removing logo")
 
-        changes.pop("logo_scale", None)  # TODO: handle logo scaling
-
-        # Apply changes to a copy of decisions
-        from dataclasses import replace
+        # Apply changes to decisions
         new_decisions = replace(decisions, **{
             k: v for k, v in changes.items()
             if hasattr(decisions, k)
@@ -965,20 +744,17 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
 
         await status_msg.edit_text("✏️ Re-rendering with your changes...")
 
-        # Reuse the SAME template HTML from the original post
         template_html = post_data.get("template_html")
 
-        # Regenerate template if template type changed or logo was added/removed
+        # Regenerate template if needed
         if needs_template_regen or ("template" in changes and changes["template"] != decisions.template):
-            from pipeline.steps.dynamic_template import generate_dynamic_template
-            reason = "logo change" if needs_template_regen else f"template {decisions.template} → {changes['template']}"
+            reason = "logo change" if needs_template_regen else f"template change"
             logger.info(f"[edit] Regenerating HTML: {reason}")
             template_html = await generate_dynamic_template(new_decisions, brain, has_logo=logo_b64 is not None)
 
-        # Re-render with same template + same image, just updated decisions
         render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64)
 
-        # Build summary of what changed
+        # Build change summary
         change_descriptions = []
         if needs_template_regen and logo_b64:
             change_descriptions.append(f"  • Added {client_name} logo")
@@ -993,14 +769,9 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
         changes_text = "\n".join(change_descriptions) if change_descriptions else "  (minor adjustments)"
         result_text = f"✅ Post edited for {client_name}\n\n✏️ Changes:\n{changes_text}"
 
-        # Send the edited image
         img_path = Path(render_result.final_image_path)
-        await msg.reply_photo(
-            photo=open(img_path, "rb"),
-            caption=result_text[:1024],
-        )
+        await msg.reply_photo(photo=open(img_path, "rb"), caption=result_text[:1024])
 
-        # Update stored post for further edits (keep same template + logo)
         _last_post_by_user[user_id] = {
             "decisions": new_decisions,
             "image": image,
@@ -1010,16 +781,20 @@ async def _handle_edit(msg, text: str, user_id: int) -> None:
             "logo_b64": logo_b64,
             "rendered_path": render_result.final_image_path,
         }
-        _add_to_history(user_id, "assistant", result_text[:300])
+
+        return f"Post edited. Changes: {changes_text}"
 
     except Exception as e:
         logger.error(f"Edit failed: {e}")
         await status_msg.edit_text(f"❌ Edit failed: {str(e)[:200]}")
-        _add_to_history(user_id, "assistant", f"Edit failed: {str(e)[:100]}")
+        return f"Edit failed: {str(e)[:100]}"
 
 
-async def _handle_reimage(msg, text: str, user_id: int) -> None:
-    """Replace the hero image in the last post while keeping all design decisions."""
+async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
+    """Replace the hero image in the last post."""
+    if user_id not in _last_post_by_user:
+        return "No recent post to reimage. Generate one first."
+
     post_data = _last_post_by_user[user_id]
     decisions = post_data["decisions"]
     concept = post_data.get("concept")
@@ -1028,21 +803,16 @@ async def _handle_reimage(msg, text: str, user_id: int) -> None:
     logo_b64 = post_data.get("logo_b64")
 
     if not concept:
-        await msg.reply_text("⚠️ No concept stored from the last post — try generating a new one.")
-        return
+        return "No concept stored from the last post — generate a new one."
 
     status_msg = await msg.reply_text("🔄 Finding a new image for this concept...")
 
     try:
-        # Re-read brain context for taste data
         pipeline_input = PipelineInput(client=client_name, brief=concept.object)
         brain_ctx = await brain_read(pipeline_input, brain)
-
-        # Generate a new image using the same concept
         new_image = await generate_image(concept, brain_ctx)
         await status_msg.edit_text(f"🖼️ Got new image ({new_image.model_used}), re-rendering...")
 
-        # Re-render with new image + same template + same decisions
         render_result = await render_post(
             decisions, new_image, client_name,
             dynamic_html=template_html, logo_b64=logo_b64,
@@ -1055,12 +825,8 @@ async def _handle_reimage(msg, text: str, user_id: int) -> None:
         )
 
         img_path = Path(render_result.final_image_path)
-        await msg.reply_photo(
-            photo=open(img_path, "rb"),
-            caption=result_text[:1024],
-        )
+        await msg.reply_photo(photo=open(img_path, "rb"), caption=result_text[:1024])
 
-        # Update stored post with new image
         _last_post_by_user[user_id] = {
             "decisions": decisions,
             "image": new_image,
@@ -1070,49 +836,245 @@ async def _handle_reimage(msg, text: str, user_id: int) -> None:
             "logo_b64": logo_b64,
             "rendered_path": render_result.final_image_path,
         }
-        _add_to_history(user_id, "assistant", result_text[:300])
+
+        return f"Image replaced ({new_image.model_used}). Same layout."
 
     except Exception as e:
         logger.error(f"Reimage failed: {e}")
         await status_msg.edit_text(f"❌ Image replacement failed: {str(e)[:200]}")
-        _add_to_history(user_id, "assistant", f"Reimage failed: {str(e)[:100]}")
+        return f"Reimage failed: {str(e)[:100]}"
 
 
-async def _handle_templates(msg, text: str) -> None:
-    """Handle template requests — show or rebuild."""
-    lower = text.lower()
-    rebuild_words = ("rebuild", "regenerate", "ξαναφτιάξε", "ξαναχτισε", "rebuild")
+async def _exec_save_favorite(params: dict, user_id: int, msg) -> str:
+    """Save the current post as a favorite."""
+    if user_id not in _last_post_by_user:
+        return "No recent post to save."
 
-    if any(w in lower for w in rebuild_words):
-        status_msg = await msg.reply_text(
-            "🔄 Rebuilding templates from your taste data...\n"
-            "This takes about 30-60 seconds."
+    last = _last_post_by_user[user_id]
+    decisions = last.get("decisions")
+    if not decisions:
+        return "No decisions to save."
+
+    modifications = params.get("modifications")
+    client_name = params.get("client") or last.get("client", "ALL")
+    concept_summary = decisions.headline if hasattr(decisions, "headline") else ""
+
+    try:
+        await save_liked_template(
+            brain=brain,
+            decisions=decisions,
+            template_html="",
+            concept_summary=concept_summary,
+            client=client_name,
+            modifications=modifications,
         )
+
+        if modifications and client_name != "ALL":
+            await save_client_preference(brain, client_name, modifications)
+
+        if modifications:
+            changes = ", ".join(f"{k}: {v}" for k, v in modifications.items())
+            reply = f"❤️ Saved with changes ({changes}) for {client_name}!"
+        else:
+            reply = f"❤️ Saved to favorites for {client_name}! I'll use this style more often."
+
+        await msg.reply_text(reply)
+        return reply
+
+    except Exception as e:
+        logger.error(f"Save favorite failed: {e}")
+        await msg.reply_text("❤️ Noted!")
+        return "Saved (with minor error in details)."
+
+
+async def _exec_process_feedback(params: dict, user_id: int) -> str:
+    """Process feedback on taste analysis."""
+    original_analysis = _last_analysis_by_user.get(user_id)
+    if not original_analysis:
+        return "No recent analysis to give feedback on."
+
+    try:
+        feedback = await parse_feedback(
+            user_message=params.get("feedback_text", ""),
+            original_analysis=original_analysis,
+            brain=brain,
+        )
+        response_text = format_feedback_response(feedback)
+        if user_id in _last_analysis_by_user:
+            del _last_analysis_by_user[user_id]
+        return response_text
+    except Exception as e:
+        return f"Feedback processing failed: {str(e)[:100]}"
+
+
+async def _exec_get_taste(user_id: int, msg) -> str:
+    """Show taste profile."""
+    try:
+        summary = await get_taste_summary(brain)
+        await msg.reply_text(summary, parse_mode="HTML")
+        return "Taste profile sent."
+    except Exception as e:
+        return f"Failed to get taste: {str(e)[:100]}"
+
+
+async def _exec_manage_templates(params: dict, msg) -> str:
+    """Show or rebuild templates."""
+    action = params.get("action", "show")
+
+    if action == "rebuild":
+        status_msg = await msg.reply_text("🔄 Rebuilding templates...\nThis takes 30-60 seconds.")
         try:
             results = await build_templates(brain)
             summary = format_templates_summary(results)
             await status_msg.edit_text(summary, parse_mode="HTML")
+            return "Templates rebuilt."
         except ValueError as e:
             await status_msg.edit_text(f"⚠️ {str(e)}")
+            return str(e)
         except Exception as e:
-            logger.error(f"Template rebuild failed: {e}")
             await status_msg.edit_text(f"❌ Failed: {str(e)[:200]}")
+            return f"Template rebuild failed: {str(e)[:100]}"
     else:
         templates_dir = Path(config.TEMPLATES_DIR)
         if not templates_dir.exists() or not list(templates_dir.glob("*.html")):
-            await msg.reply_text(
-                "📐 No templates yet. Feed 10+ inspiration images first, "
-                "then say 'rebuild templates'."
-            )
-            return
+            await msg.reply_text("📐 No templates yet. Feed 10+ images first, then say 'rebuild templates'.")
+            return "No templates available."
         template_files = sorted(templates_dir.glob("*.html"))
         lines = ["📐 Current Templates\n"]
         for t in template_files:
             lines.append(f"  • {t.stem}")
         await msg.reply_text("\n".join(lines))
+        return f"Showed {len(template_files)} templates."
 
 
-# ── /start command (keep this one) ───────────────────────
+async def _exec_resend(user_id: int, msg) -> str:
+    """Re-send the last generated post."""
+    if user_id not in _last_post_by_user:
+        await msg.reply_text("🤷 No recent post. Make one first!")
+        return "No recent post to resend."
+
+    post_data = _last_post_by_user[user_id]
+    rendered = post_data.get("rendered_path")
+    if rendered and Path(rendered).exists():
+        await msg.reply_photo(
+            photo=open(Path(rendered), "rb"),
+            caption=f"📎 Last post for {post_data.get('client', '?')}",
+        )
+        return "Last post re-sent."
+    else:
+        await msg.reply_text("⚠️ The file is no longer available. Try generating a new one.")
+        return "File not available."
+
+
+# ── Main Text Handler (Claude Tool-Use) ──────────────────
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle all text messages using Claude tool-use. Claude decides what to do."""
+    msg = update.message
+    if not msg or not msg.text:
+        return
+
+    text = msg.text.strip()
+    user_id = msg.from_user.id if msg.from_user else 0
+
+    # Add user message to history
+    _add_to_history(user_id, "user", text)
+
+    # Build system prompt with current state
+    system = _build_system_prompt(user_id)
+
+    # Build messages for API
+    messages = _get_history_for_api(user_id)
+    if not messages:
+        messages = [{"role": "user", "content": text}]
+
+    try:
+        # Call Claude with tools
+        response = await asyncio.to_thread(
+            _ai_client.messages.create,
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            system=system,
+            tools=TOOLS,
+            messages=messages,
+        )
+
+        # Process response in a loop (handle tool calls)
+        while response.stop_reason == "tool_use":
+            # Collect all tool calls from this response
+            tool_results = []
+            assistant_content = response.content  # Save full assistant response
+
+            for block in response.content:
+                if block.type == "tool_use":
+                    logger.info(f"[tool-use] Claude called {block.name}")
+                    result = await _execute_tool(block.name, block.input, user_id, msg)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+
+            # Add assistant message + tool results to conversation
+            # Convert content blocks to dicts for history storage
+            assistant_content_dicts = []
+            for block in assistant_content:
+                if block.type == "text":
+                    assistant_content_dicts.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    assistant_content_dicts.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    })
+
+            _add_to_history(user_id, "assistant", assistant_content_dicts)
+            _add_to_history(user_id, "user", tool_results)
+
+            # Call Claude again with updated messages
+            messages = _get_history_for_api(user_id)
+            response = await asyncio.to_thread(
+                _ai_client.messages.create,
+                model="claude-sonnet-4-20250514",
+                max_tokens=1024,
+                system=system,
+                tools=TOOLS,
+                messages=messages,
+            )
+
+        # Extract final text response
+        final_text = ""
+        final_content_dicts = []
+        for block in response.content:
+            if block.type == "text":
+                final_text += block.text
+                final_content_dicts.append({"type": "text", "text": block.text})
+
+        # Store assistant response in history
+        if final_content_dicts:
+            _add_to_history(user_id, "assistant", final_content_dicts)
+
+        # Send Claude's natural language response (if any and if it adds value)
+        if final_text.strip():
+            # Don't send redundant confirmations if we already sent an image
+            try:
+                await msg.reply_text(final_text.strip())
+            except Exception as e:
+                logger.warning(f"Failed to send text response: {e}")
+
+    except Exception as e:
+        logger.error(f"Tool-use handler failed: {e}", exc_info=True)
+        # Fallback: just respond naturally
+        try:
+            await msg.reply_text(
+                "🎨 Hey! Something went wrong. Try again or say 'make a post for [client]'."
+            )
+        except Exception:
+            pass
+
+
+# ── /start command ────────────────────────────────────────
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "🎨 Lectus Creative Engine\n\n"
