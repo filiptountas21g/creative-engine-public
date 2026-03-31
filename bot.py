@@ -982,6 +982,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     text = msg.text.strip()
     user_id = msg.from_user.id if msg.from_user else 0
+    logger.info(f"[text] Received from {user_id}: {text[:80]}")
 
     # Add user message to history
     _add_to_history(user_id, "user", text)
@@ -1110,10 +1111,15 @@ def main():
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
+    # Error handler to catch unhandled exceptions
+    async def error_handler(update, context):
+        logger.error(f"Unhandled exception: {context.error}", exc_info=context.error)
+
     # Only /start — everything else is natural language
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_error_handler(error_handler)
 
     # Drive watcher
     drive_watcher.bot = app.bot
