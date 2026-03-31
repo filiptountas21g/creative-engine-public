@@ -43,23 +43,37 @@ Example: concept="vintage compass on leather" → queries=["vintage brass compas
 async def generate_image(
     concept: CreativeConcept,
     brain_ctx: BrainContext,
+    image_source: str = "auto",
 ) -> ImageResult:
     """
     Source the best image for this concept.
 
-    Tries stock photos first (Unsplash/Pexels), falls back to AI generation.
-    Claude Vision judges stock photo quality before accepting.
+    image_source:
+      "auto" — tries stock first, falls back to AI (default)
+      "stock" — stock photos only, lower quality threshold, no AI fallback
+      "ai" — AI generation only, skip stock search
     """
     taste = brain_ctx.taste_context
 
-    # Try stock photos first if APIs are available
+    if image_source == "ai":
+        return await _generate_ai_image(concept, taste)
+
+    # Try stock photos if APIs are available
     has_stock = config.UNSPLASH_ACCESS_KEY or config.PEXELS_API_KEY
     if has_stock:
         try:
-            stock_result = await _try_stock_photos(concept, taste)
+            # Lower the bar for stock-only mode
+            stock_result = await _try_stock_photos(concept, taste, lenient=(image_source == "stock"))
             if stock_result:
                 return stock_result
-            logger.info("Stock photos not good enough — falling back to AI generation")
+            if image_source == "stock":
+                logger.warning("Stock-only mode but no good photos found — trying broader search")
+                stock_result = await _try_stock_photos_broad(concept, taste)
+                if stock_result:
+                    return stock_result
+                logger.warning("Still no stock photos — forced to use AI as last resort")
+            else:
+                logger.info("Stock photos not good enough — falling back to AI generation")
         except Exception as e:
             logger.warning(f"Stock photo search failed: {e} — falling back to AI generation")
 
@@ -69,8 +83,9 @@ async def generate_image(
 
 # ── Stock photo pipeline ──────────────────────────────────
 
-async def _try_stock_photos(concept: CreativeConcept, taste: dict) -> ImageResult | None:
-    """Search stock photos, judge them with Claude Vision, return best or None."""
+async def _try_stock_photos(concept: CreativeConcept, taste: dict, lenient: bool = False) -> ImageResult | None:
+    """Search stock photos, judge them with Claude Vision, return best or None.
+    If lenient=True, accept medium/low confidence and be less strict about exact concept match."""
 
     # Step 1: Get search queries from Opus
     search_spec = await _write_search_queries(concept)
@@ -113,7 +128,7 @@ async def _try_stock_photos(concept: CreativeConcept, taste: dict) -> ImageResul
         return None
 
     # Step 4: Claude Vision judges
-    best = await _judge_stock_photos(downloaded, concept, must_have, taste)
+    best = await _judge_stock_photos(downloaded, concept, must_have, taste, lenient=lenient)
 
     if not best:
         return None
@@ -135,6 +150,58 @@ async def _try_stock_photos(concept: CreativeConcept, taste: dict) -> ImageResul
             image_url=best["full_url"],
             model_used=f"stock-{best['source']}",
             prompt_used=f"Stock search: {best.get('query', '')}",
+        )
+
+
+async def _try_stock_photos_broad(concept: CreativeConcept, taste: dict) -> ImageResult | None:
+    """Broader stock search as a second attempt — uses simpler, more generic queries."""
+    # Extract the core subject/mood as simpler search terms
+    simple_queries = [
+        concept.object.split(",")[0].strip()[:30],  # First part of concept only
+        concept.emotional_direction or "professional",
+    ]
+
+    candidates = []
+    async with httpx.AsyncClient(timeout=30) as http:
+        for query in simple_queries:
+            if config.UNSPLASH_ACCESS_KEY:
+                results = await _search_unsplash(http, query)
+                candidates.extend(results)
+
+    if not candidates:
+        return None
+
+    top_candidates = candidates[:6]  # More candidates for broader search
+    async with httpx.AsyncClient(timeout=30) as http:
+        downloaded = []
+        for cand in top_candidates:
+            try:
+                resp = await http.get(cand["thumb_url"])
+                resp.raise_for_status()
+                downloaded.append({**cand, "image_bytes": resp.content})
+            except Exception:
+                continue
+
+    if not downloaded:
+        return None
+
+    best = await _judge_stock_photos(downloaded, concept, "", taste, lenient=True)
+    if not best:
+        return None
+
+    async with httpx.AsyncClient(timeout=60) as http:
+        resp = await http.get(best["full_url"])
+        resp.raise_for_status()
+        output_dir = Path(config.OUTPUT_DIR)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        img_path = output_dir / "hero_temp.png"
+        img_path.write_bytes(resp.content)
+        logger.info(f"Broad stock search found: {img_path} (source: {best['source']})")
+        return ImageResult(
+            image_path=str(img_path),
+            image_url=best["full_url"],
+            model_used=f"stock-{best['source']}",
+            prompt_used=f"Broad stock search: {best.get('query', '')}",
         )
 
 
@@ -234,8 +301,20 @@ async def _judge_stock_photos(
     concept: CreativeConcept,
     must_have: str,
     taste: dict,
+    lenient: bool = False,
 ) -> dict | None:
     """Use Claude Vision to judge stock photos. Returns the best one or None."""
+
+    strictness = (
+        "The user specifically asked for a stock photo, so be MORE ACCEPTING. "
+        "Pick the BEST available photo even if it's not a perfect match for the concept. "
+        "A good-looking, professional photo that captures the general mood is fine. "
+        "Only return -1 if ALL photos are truly terrible quality or completely irrelevant."
+    ) if lenient else (
+        "Be SELECTIVE — only pick a photo if it genuinely matches the concept. "
+        "If the results are generic or don't capture the specific idea, return -1 "
+        "so we can generate with AI instead."
+    )
 
     # Build vision message with all candidate images
     content = [
@@ -258,9 +337,7 @@ async def _judge_stock_photos(
                 f'{{"winner": 0-based index of best photo or -1 if NONE are good enough, '
                 f'"reason": "why this one (or why none work)", '
                 f'"confidence": "high/medium/low"}}\n\n'
-                f"Be SELECTIVE — only pick a photo if it genuinely matches the concept. "
-                f"If the results are generic or don't capture the specific idea, return -1 "
-                f"so we can generate with AI instead."
+                f"{strictness}"
             ),
         }
     ]
@@ -305,8 +382,8 @@ async def _judge_stock_photos(
         if winner_idx < 0 or winner_idx >= len(candidates):
             return None
 
-        # Only accept high or medium confidence
-        if confidence == "low":
+        # In lenient mode, accept any confidence; in strict mode reject low
+        if confidence == "low" and not lenient:
             logger.info("Low confidence — rejecting stock photos")
             return None
 

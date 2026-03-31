@@ -42,6 +42,7 @@ async def run_pipeline(
     brain: Brain,
     on_progress=None,
     previous_decisions: list[dict] | None = None,
+    image_source: str = "auto",
 ) -> PipelineResult:
     """
     Run the full creative generation pipeline.
@@ -94,7 +95,7 @@ async def run_pipeline(
 
         # Step 5: Image Generation (Opus prompt → Flux/Ideogram)
         await _notify("image", "Generating hero image...")
-        image = await generate_image(concept, brain_ctx)
+        image = await generate_image(concept, brain_ctx, image_source=image_source)
         await _notify("image", f"Image ready ({image.model_used})")
 
         result.hero_image = image

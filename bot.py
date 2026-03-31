@@ -140,6 +140,11 @@ TOOLS = [
                     "enum": ["linkedin", "instagram", "facebook"],
                     "description": "Social media platform. Default: linkedin",
                 },
+                "image_source": {
+                    "type": "string",
+                    "enum": ["auto", "stock", "ai"],
+                    "description": "Image source preference. 'stock' = stock photos only, 'ai' = AI-generated only, 'auto' = try stock first then AI. Default: auto. Use 'stock' when user explicitly asks for stock/real photos.",
+                },
             },
             "required": ["client", "brief"],
         },
@@ -553,6 +558,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
     client_name = params.get("client", "ALL")
     brief = params.get("brief", "creative post")
     platform = params.get("platform", "linkedin")
+    image_source = params.get("image_source", "auto")
 
     status_msg = await msg.reply_text(
         f"🎨 Generating post for {client_name}...\n"
@@ -575,7 +581,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
 
     pipeline_input = PipelineInput(client=client_name, brief=brief, platform=platform)
     prev = _previous_decisions.get(user_id)
-    result = await run_pipeline(pipeline_input, brain, on_progress=on_progress, previous_decisions=prev)
+    result = await run_pipeline(pipeline_input, brain, on_progress=on_progress, previous_decisions=prev, image_source=image_source)
     result_text = format_result_for_telegram(result, pipeline_input)
 
     if result.success and result.image_path:
