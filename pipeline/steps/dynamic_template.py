@@ -53,6 +53,10 @@ CRITICAL RULES:
 - Make each layout genuinely different — vary grid structures, text placement, image sizing, decorative elements
 - Use the inspiration as a starting point, not a copy
 - Be creative with layout: overlapping elements, asymmetric grids, text over image, sidebar layouts, diagonal cuts, etc.
+- NEVER write actual text content into the HTML. ONLY use placeholders: {{HEADLINE}}, {{SUBTEXT}}, {{CTA}}, {{CLIENT_NAME}}
+  For example, write: <h1>{{HEADLINE}}</h1>
+  NEVER write: <h1>Clear thinking. Elevated results.</h1>
+  The render engine will replace the placeholders with the actual text.
 
 Return ONLY the complete HTML file. No explanation, no markdown fences."""
 
@@ -125,6 +129,18 @@ Return the complete HTML file."""
             if html.endswith("```"):
                 html = html[:-3]
             html = html.strip()
+
+        # First: replace any hardcoded text that should be placeholders
+        # Opus sometimes writes the actual text instead of {{HEADLINE}} etc.
+        _text_to_placeholder = {
+            decisions.headline: "{{HEADLINE}}",
+            decisions.subtext: "{{SUBTEXT}}",
+            decisions.cta: "{{CTA}}",
+        }
+        for actual_text, placeholder in _text_to_placeholder.items():
+            if actual_text and placeholder not in html and actual_text in html:
+                logger.info(f"Replacing hardcoded '{actual_text[:40]}...' with {placeholder}")
+                html = html.replace(actual_text, placeholder, 1)  # Replace first occurrence only
 
         # Validate required placeholders
         required = ["{{HEADLINE}}", "{{IMAGE_PATH}}", "{{SUBTEXT}}", "{{CLIENT_NAME}}"]
