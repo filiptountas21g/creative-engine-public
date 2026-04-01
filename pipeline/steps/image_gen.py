@@ -597,30 +597,207 @@ async def generate_extra_images(
 ) -> list[ImageResult]:
     """Generate multiple additional images for multi-image templates.
 
+    For stock: does one batch search and picks the top N different photos.
+    For AI: generates N separate images.
     Each image gets a unique filename (extra_1.png, extra_2.png, etc.).
-    Uses the same concept but varied search queries for stock photos.
     """
+    taste = brain_ctx.taste_context
+
+    # Try batch stock search first (unless AI-only)
+    if image_source != "ai":
+        has_stock = bool(config.UNSPLASH_ACCESS_KEY) or bool(config.PEXELS_API_KEY)
+        if has_stock:
+            try:
+                logger.info(f"Batch stock search for {count} extra images...")
+                stock_results = await _batch_stock_photos(concept, taste, count, lenient=(image_source == "stock"))
+                if len(stock_results) >= count:
+                    logger.info(f"Got {len(stock_results)} stock photos for extra images")
+                    return stock_results[:count]
+                elif stock_results:
+                    logger.info(f"Got {len(stock_results)}/{count} stock photos, generating rest with AI")
+                    # Fill remaining with AI
+                    for i in range(len(stock_results), count):
+                        try:
+                            img = await _generate_ai_image(concept, taste)
+                            unique_path = Path(img.image_path).parent / f"extra_{i + 1}.png"
+                            import shutil
+                            shutil.copy2(img.image_path, str(unique_path))
+                            img.image_path = str(unique_path)
+                            stock_results.append(img)
+                        except Exception as e:
+                            logger.error(f"AI fallback for extra image {i + 1} failed: {e}")
+                    return stock_results
+            except Exception as e:
+                logger.warning(f"Batch stock search failed: {e}")
+
+    # AI generation: generate each one separately
     results = []
     for i in range(count):
         try:
-            logger.info(f"Generating extra image {i + 1}/{count}...")
-            img = await generate_image(concept, brain_ctx, image_source=image_source)
+            logger.info(f"Generating extra AI image {i + 1}/{count}...")
+            img = await _generate_ai_image(concept, taste)
 
-            # Rename to unique path so images don't overwrite each other
+            # Rename to unique path
             original = Path(img.image_path)
             unique_path = original.parent / f"extra_{i + 1}{original.suffix}"
-            if original.exists():
-                import shutil
-                shutil.copy2(str(original), str(unique_path))
-                img.image_path = str(unique_path)
+            import shutil
+            shutil.copy2(str(original), str(unique_path))
+            img.image_path = str(unique_path)
 
             results.append(img)
             logger.info(f"Extra image {i + 1} ready: {img.image_path}")
         except Exception as e:
             logger.error(f"Extra image {i + 1} failed: {e}")
-            # Continue — partial results are better than none
 
     return results
+
+
+async def _batch_stock_photos(
+    concept: CreativeConcept,
+    taste: dict,
+    count: int,
+    lenient: bool = False,
+) -> list[ImageResult]:
+    """Search stock photos and return the top N different ones."""
+
+    # Get search queries
+    search_spec = await _write_search_queries(concept)
+    queries = search_spec.get("queries", [concept.object])
+
+    # Search with more queries to get a bigger pool
+    candidates = []
+    async with httpx.AsyncClient(timeout=30) as http:
+        for query in queries[:3]:  # up to 3 queries for bigger pool
+            logger.info(f"Batch stock search: '{query}'")
+            if config.UNSPLASH_ACCESS_KEY:
+                results = await _search_unsplash(http, query)
+                candidates.extend(results)
+            if config.PEXELS_API_KEY:
+                results = await _search_pexels(http, query)
+                candidates.extend(results)
+
+    logger.info(f"Batch stock: {len(candidates)} total candidates for {count} slots")
+    if not candidates:
+        return []
+
+    # Download thumbnails for judging — get more than we need
+    top_candidates = candidates[:min(len(candidates), count * 4)]
+    async with httpx.AsyncClient(timeout=30) as http:
+        downloaded = []
+        for cand in top_candidates:
+            try:
+                resp = await http.get(cand["thumb_url"])
+                resp.raise_for_status()
+                downloaded.append({**cand, "image_bytes": resp.content})
+            except Exception:
+                continue
+
+    if not downloaded:
+        return []
+
+    # Ask Vision to rank the top N
+    winners = await _judge_stock_photos_batch(downloaded, concept, taste, count, lenient=lenient)
+    if not winners:
+        return []
+
+    # Download full-res for each winner
+    results = []
+    output_dir = Path(config.OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    async with httpx.AsyncClient(timeout=60) as http:
+        for i, winner in enumerate(winners):
+            try:
+                resp = await http.get(winner["full_url"])
+                resp.raise_for_status()
+                img_path = output_dir / f"extra_{i + 1}.png"
+                img_path.write_bytes(resp.content)
+                results.append(ImageResult(
+                    image_path=str(img_path),
+                    image_url=winner["full_url"],
+                    model_used=f"stock-{winner['source']}",
+                    prompt_used=f"Stock batch: {winner.get('query', '')}",
+                ))
+                logger.info(f"Batch stock photo {i + 1} saved: {img_path}")
+            except Exception as e:
+                logger.error(f"Failed to download stock photo {i + 1}: {e}")
+
+    return results
+
+
+async def _judge_stock_photos_batch(
+    candidates: list[dict],
+    concept: CreativeConcept,
+    taste: dict,
+    count: int,
+    lenient: bool = False,
+) -> list[dict]:
+    """Use Claude Vision to pick the top N different stock photos."""
+
+    content = [
+        {
+            "type": "text",
+            "text": (
+                f"I need {count} DIFFERENT stock photos for a multi-image social media post.\n\n"
+                f"CONCEPT: {concept.object}\n"
+                f"MOOD: {concept.emotional_direction}\n\n"
+                f"Below are {len(candidates)} candidates. Pick the BEST {count} that:\n"
+                f"1. Are visually DIFFERENT from each other (variety matters)\n"
+                f"2. Are professional quality\n"
+                f"3. Work together as a cohesive set\n"
+                f"4. Match the general mood/concept\n\n"
+                f"Return ONLY valid JSON:\n"
+                f'{{"winners": [0-based indices of the {count} best photos], '
+                f'"reason": "why these work as a set"}}\n\n'
+                f"{'Pick ANY decent professional photos. Be lenient.' if lenient else 'Be selective but you MUST pick ' + str(count) + '.'}"
+            ),
+        }
+    ]
+
+    for i, cand in enumerate(candidates):
+        img_b64 = base64.b64encode(cand["image_bytes"]).decode("utf-8")
+        content.append({
+            "type": "text",
+            "text": f"\nPhoto {i} ({cand['source']}): {cand.get('description', '')}",
+        })
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": img_b64,
+            },
+        })
+
+    try:
+        response = _client.messages.create(
+            model=config.VISION_MODEL,
+            max_tokens=400,
+            messages=[{"role": "user", "content": content}],
+        )
+
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+
+        result = json.loads(raw)
+        winner_indices = result.get("winners", [])
+        reason = result.get("reason", "")
+        logger.info(f"Batch stock judge: winners={winner_indices}, reason={reason[:100]}")
+
+        # Return the winning candidates in order
+        winners = []
+        for idx in winner_indices:
+            if 0 <= idx < len(candidates):
+                winners.append(candidates[idx])
+        return winners
+
+    except Exception as e:
+        logger.error(f"Batch stock judging failed: {e}")
+        return []
 
 
 async def _generate_ideogram(prompt: str, spec: dict) -> ImageResult:
