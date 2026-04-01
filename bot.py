@@ -510,21 +510,20 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if reply:
             _analysis_by_msg[reply.message_id] = analysis
 
-        # Check if the caption implies the user wants a post generated from this
+        # If there's a caption, let Claude decide what to do with it
         if caption:
-            caption_lower = caption.lower()
-            wants_post = any(phrase in caption_lower for phrase in [
-                "make me", "make a post", "similar to this", "like this", "based on this",
-                "create a post", "generate", "something like", "φτιάξε", "κάνε μου",
-                "παρόμοιο", "σαν αυτό",
-            ])
-            if wants_post:
-                logger.info(f"Caption implies post generation: '{caption[:60]}' — auto-triggering generate")
-                # Add the request to history and run through Claude tool-use
-                request_text = f"[User sent an inspiration image and said: \"{caption}\"] Make a post similar to the image I just analyzed. Use use_last_inspiration=true."
-                _add_to_history(user_id, "user", request_text)
-                await _run_tool_use_loop(user_id, msg)
-                return
+            logger.info(f"Photo has caption — letting Claude decide: '{caption[:60]}'")
+            request_text = (
+                f"[User sent an inspiration image which I just analyzed. "
+                f"The analysis is now stored as the latest inspiration. "
+                f"The user's message with the image was: \"{caption}\"]\n\n"
+                f"Decide what to do: if the user is asking you to create/generate/make a post based on this image, "
+                f"call generate_post with use_last_inspiration=true. "
+                f"If they're just sharing inspiration or adding context, respond naturally."
+            )
+            _add_to_history(user_id, "user", request_text)
+            await _run_tool_use_loop(user_id, msg)
+            return
 
     except Exception as e:
         logger.error(f"Photo analysis failed: {e}")
