@@ -591,10 +591,22 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
     if result.success and result.image_path:
         try:
             img_path = Path(result.image_path)
+            # Compress if file is too large for Telegram (max 10MB, aim for < 5MB)
+            send_path = img_path
+            if img_path.stat().st_size > 5 * 1024 * 1024:
+                from PIL import Image as PILImage
+                with PILImage.open(img_path) as pil_img:
+                    compressed = img_path.with_suffix(".jpg")
+                    pil_img.convert("RGB").save(compressed, "JPEG", quality=85)
+                    send_path = compressed
+                    logger.info(f"Compressed image: {img_path.stat().st_size // 1024}KB → {compressed.stat().st_size // 1024}KB")
             await msg.reply_photo(
-                photo=open(img_path, "rb"),
+                photo=open(send_path, "rb"),
                 caption=result_text[:1024],
                 parse_mode="HTML",
+                read_timeout=60,
+                write_timeout=60,
+                connect_timeout=30,
             )
             if len(result_text) > 1024:
                 await msg.reply_text(result_text[1024:], parse_mode="HTML")
@@ -680,7 +692,7 @@ async def _exec_generate_carousel(params: dict, user_id: int, msg) -> str:
         logger.error(f"Failed to send album: {e}")
         for r in successful:
             try:
-                await msg.reply_photo(photo=open(Path(r.image_path), "rb"))
+                await msg.reply_photo(photo=open(Path(r.image_path), "rb"), read_timeout=60, write_timeout=60)
             except Exception:
                 pass
 
@@ -781,7 +793,7 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
         result_text = f"✅ Post edited for {client_name}\n\n✏️ Changes:\n{changes_text}"
 
         img_path = Path(render_result.final_image_path)
-        await msg.reply_photo(photo=open(img_path, "rb"), caption=result_text[:1024])
+        await msg.reply_photo(photo=open(img_path, "rb"), caption=result_text[:1024], read_timeout=60, write_timeout=60)
 
         _last_post_by_user[user_id] = {
             "decisions": new_decisions,
@@ -836,7 +848,7 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
         )
 
         img_path = Path(render_result.final_image_path)
-        await msg.reply_photo(photo=open(img_path, "rb"), caption=result_text[:1024])
+        await msg.reply_photo(photo=open(img_path, "rb"), caption=result_text[:1024], read_timeout=60, write_timeout=60)
 
         _last_post_by_user[user_id] = {
             "decisions": decisions,
@@ -970,6 +982,7 @@ async def _exec_resend(user_id: int, msg) -> str:
         await msg.reply_photo(
             photo=open(Path(rendered), "rb"),
             caption=f"📎 Last post for {post_data.get('client', '?')}",
+            read_timeout=60, write_timeout=60,
         )
         return "Last post re-sent."
     else:
