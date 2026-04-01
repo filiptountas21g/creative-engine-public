@@ -510,6 +510,22 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if reply:
             _analysis_by_msg[reply.message_id] = analysis
 
+        # Check if the caption implies the user wants a post generated from this
+        if caption:
+            caption_lower = caption.lower()
+            wants_post = any(phrase in caption_lower for phrase in [
+                "make me", "make a post", "similar to this", "like this", "based on this",
+                "create a post", "generate", "something like", "φτιάξε", "κάνε μου",
+                "παρόμοιο", "σαν αυτό",
+            ])
+            if wants_post:
+                logger.info(f"Caption implies post generation: '{caption[:60]}' — auto-triggering generate")
+                # Add the request to history and run through Claude tool-use
+                request_text = f"[User sent an inspiration image and said: \"{caption}\"] Make a post similar to the image I just analyzed. Use use_last_inspiration=true."
+                _add_to_history(user_id, "user", request_text)
+                await _run_tool_use_loop(user_id, msg)
+                return
+
     except Exception as e:
         logger.error(f"Photo analysis failed: {e}")
         try:
@@ -1103,31 +1119,16 @@ async def _exec_resend(user_id: int, msg) -> str:
         return "File not available."
 
 
-# ── Main Text Handler (Claude Tool-Use) ──────────────────
+# ── Tool-Use Loop (shared by text_handler and photo_handler) ──
 
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle all text messages using Claude tool-use. Claude decides what to do."""
-    msg = update.message
-    if not msg or not msg.text:
-        return
-
-    text = msg.text.strip()
-    user_id = msg.from_user.id if msg.from_user else 0
-    logger.info(f"[text] Received from {user_id}: {text[:80]}")
-
-    # Add user message to history
-    _add_to_history(user_id, "user", text)
-
-    # Build system prompt with current state
+async def _run_tool_use_loop(user_id: int, msg) -> None:
+    """Run the Claude tool-use loop. Expects history to already contain the user message."""
     system = _build_system_prompt(user_id)
-
-    # Build messages for API
     messages = _get_history_for_api(user_id)
     if not messages:
-        messages = [{"role": "user", "content": text}]
+        return
 
     try:
-        # Call Claude with tools
         response = await asyncio.to_thread(
             _ai_client.messages.create,
             model="claude-sonnet-4-20250514",
@@ -1137,11 +1138,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             messages=messages,
         )
 
-        # Process response in a loop (handle tool calls)
         while response.stop_reason == "tool_use":
-            # Collect all tool calls from this response
             tool_results = []
-            assistant_content = response.content  # Save full assistant response
+            assistant_content = response.content
 
             for block in response.content:
                 if block.type == "tool_use":
@@ -1153,8 +1152,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         "content": result,
                     })
 
-            # Add assistant message + tool results to conversation
-            # Convert content blocks to dicts for history storage
             assistant_content_dicts = []
             for block in assistant_content:
                 if block.type == "text":
@@ -1170,7 +1167,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             _add_to_history(user_id, "assistant", assistant_content_dicts)
             _add_to_history(user_id, "user", tool_results)
 
-            # Call Claude again with updated messages
             messages = _get_history_for_api(user_id)
             response = await asyncio.to_thread(
                 _ai_client.messages.create,
@@ -1181,7 +1177,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 messages=messages,
             )
 
-        # Extract final text response
         final_text = ""
         final_content_dicts = []
         for block in response.content:
@@ -1189,13 +1184,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 final_text += block.text
                 final_content_dicts.append({"type": "text", "text": block.text})
 
-        # Store assistant response in history
         if final_content_dicts:
             _add_to_history(user_id, "assistant", final_content_dicts)
 
-        # Send Claude's natural language response (if any and if it adds value)
         if final_text.strip():
-            # Don't send redundant confirmations if we already sent an image
             try:
                 await msg.reply_text(final_text.strip())
             except Exception as e:
@@ -1203,13 +1195,28 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     except Exception as e:
         logger.error(f"Tool-use handler failed: {e}", exc_info=True)
-        # Fallback: just respond naturally
         try:
             await msg.reply_text(
                 "🎨 Hey! Something went wrong. Try again or say 'make a post for [client]'."
             )
         except Exception:
             pass
+
+
+# ── Main Text Handler ─────────────────────────────────────
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle all text messages using Claude tool-use. Claude decides what to do."""
+    msg = update.message
+    if not msg or not msg.text:
+        return
+
+    text = msg.text.strip()
+    user_id = msg.from_user.id if msg.from_user else 0
+    logger.info(f"[text] Received from {user_id}: {text[:80]}")
+
+    _add_to_history(user_id, "user", text)
+    await _run_tool_use_loop(user_id, msg)
 
 
 # ── /start command ────────────────────────────────────────
