@@ -339,7 +339,8 @@ Rules:
 - For edit_post, YOU decide the exact field values. Don't ask the user for hex codes — just pick good ones.
 - When translating, translate headline, subtext, AND cta. Keep the same tone and meaning.
 - Only change the MINIMUM fields needed for edit_post.
-- If the user just wants to chat or says hi, respond naturally without calling any tools."""
+- If the user just wants to chat or says hi, respond naturally without calling any tools.
+- COLOR CHANGES: When user says "replace orange with yellow", change ALL fields that are orange-ish (could be color_bg, color_accent, color_text, color_subtext). Check which fields actually contain the color they're referring to. Use DISTINCT, clearly different colors — not subtle variations. Yellow = #FFD700 or #FBBF24, not #F59E0B (that's still orange). Blue = #2563EB, Red = #DC2626, Green = #16A34A, etc."""
 
 
 # ── Photo handler (taste ingestion + logo detection) ─────
