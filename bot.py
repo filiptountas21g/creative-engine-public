@@ -1246,7 +1246,14 @@ async def _drive_poll_job():
 def main():
     logger.info("Starting Lectus Creative Engine...")
 
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    from telegram.request import HTTPXRequest
+    request = HTTPXRequest(
+        read_timeout=120,
+        write_timeout=120,
+        connect_timeout=30,
+        pool_timeout=30,
+    )
+    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).request(request).build()
 
     # Error handler to catch unhandled exceptions
     async def error_handler(update, context):
