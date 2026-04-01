@@ -589,6 +589,40 @@ async def _poll_fal_result(client: httpx.AsyncClient, request_id: str, max_polls
     raise TimeoutError("Flux generation timed out")
 
 
+async def generate_extra_images(
+    concept: CreativeConcept,
+    brain_ctx: BrainContext,
+    count: int,
+    image_source: str = "auto",
+) -> list[ImageResult]:
+    """Generate multiple additional images for multi-image templates.
+
+    Each image gets a unique filename (extra_1.png, extra_2.png, etc.).
+    Uses the same concept but varied search queries for stock photos.
+    """
+    results = []
+    for i in range(count):
+        try:
+            logger.info(f"Generating extra image {i + 1}/{count}...")
+            img = await generate_image(concept, brain_ctx, image_source=image_source)
+
+            # Rename to unique path so images don't overwrite each other
+            original = Path(img.image_path)
+            unique_path = original.parent / f"extra_{i + 1}{original.suffix}"
+            if original.exists():
+                import shutil
+                shutil.copy2(str(original), str(unique_path))
+                img.image_path = str(unique_path)
+
+            results.append(img)
+            logger.info(f"Extra image {i + 1} ready: {img.image_path}")
+        except Exception as e:
+            logger.error(f"Extra image {i + 1} failed: {e}")
+            # Continue — partial results are better than none
+
+    return results
+
+
 async def _generate_ideogram(prompt: str, spec: dict) -> ImageResult:
     """Generate image with Ideogram 3 API."""
     ASPECT_MAP = {

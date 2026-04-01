@@ -15,7 +15,7 @@ from pipeline.steps.research import research
 from pipeline.steps.brain_read import brain_read
 from pipeline.steps.concept import creative_concept
 from pipeline.steps.copy import write_copy
-from pipeline.steps.image_gen import generate_image
+from pipeline.steps.image_gen import generate_image, generate_extra_images
 from pipeline.steps.decisions import creative_decisions
 from pipeline.steps.render import render
 from pipeline.steps.dynamic_template import generate_dynamic_template, get_client_preferences, fix_template_from_critique
@@ -130,13 +130,26 @@ async def run_pipeline(
         dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=has_logo, forced_reference=forced_reference)
         await _notify("template", "Layout ready")
 
+        # Count image slots in template — generate extra images if needed
+        import re
+        extra_images = []
+        image_slots = set(re.findall(r'\{\{IMAGE_(\d+)\}\}', dynamic_html))
+        max_slot = max((int(s) for s in image_slots), default=1)
+        if max_slot > 1:
+            extra_count = max_slot - 1  # IMAGE_1 is the hero, need 2..N
+            await _notify("image", f"Template needs {max_slot} images — generating {extra_count} more...")
+            extra_images = await generate_extra_images(
+                concept, brain_ctx, count=extra_count, image_source=image_source,
+            )
+            await _notify("image", f"{len(extra_images)} extra images ready")
+
         # Step 7: Render → Critique → Fix loop (max 2 revision passes)
         MAX_REVISIONS = 2
         current_html = dynamic_html
 
         for iteration in range(1, MAX_REVISIONS + 2):  # 1 = first render, 2-3 = revisions
             await _notify("render", f"Rendering {'final ' if iteration > MAX_REVISIONS else ''}PNG{f' (revision {iteration - 1})' if iteration > 1 else ''}...")
-            render_result = await render(decisions, image, input.client, dynamic_html=current_html, logo_b64=logo_b64)
+            render_result = await render(decisions, image, input.client, dynamic_html=current_html, logo_b64=logo_b64, extra_images=extra_images)
 
             # Skip critique on last allowed iteration or if we've done max revisions
             if iteration > MAX_REVISIONS:
