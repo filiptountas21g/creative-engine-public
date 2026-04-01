@@ -184,11 +184,22 @@ TOOLS = [
             "Modify the last generated post — change text, colors, fonts, sizes, layout, translate text, "
             "add/remove logo. The hero image stays the same. Use for ANY tweak to the existing post: "
             "translating, restyling, changing text, adjusting layout. "
+            "For visual/layout feedback like 'make pictures bigger', 'move text to the right', 'more spacing', "
+            "use the 'feedback' field — Opus will directly edit the HTML/CSS to fix it. "
             "IMPORTANT: Only include fields that need to change."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                "feedback": {
+                    "type": "string",
+                    "description": (
+                        "Freeform visual feedback from the user that requires HTML/CSS changes. "
+                        "Use for layout tweaks like 'make the pictures bigger', 'move text to the right', "
+                        "'add more space between elements', 'make the grid 2x2', etc. "
+                        "Opus will directly modify the template HTML/CSS based on this feedback."
+                    ),
+                },
                 "headline": {"type": "string", "description": "New headline text (change for translation or rewording)"},
                 "subtext": {"type": "string", "description": "New supporting text"},
                 "cta": {"type": "string", "description": "New call-to-action text"},
@@ -814,6 +825,9 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             needs_template_regen = True
             logger.info(f"[edit] Removing logo")
 
+        # Extract freeform feedback (handled separately via Opus HTML fix)
+        user_feedback = changes.pop("feedback", None)
+
         # Apply changes to decisions
         new_decisions = replace(decisions, **{
             k: v for k, v in changes.items()
@@ -830,11 +844,25 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             logger.info(f"[edit] Regenerating HTML: {reason}")
             template_html = await generate_dynamic_template(new_decisions, brain, has_logo=logo_b64 is not None)
 
+        # Apply freeform feedback — Opus directly edits the HTML/CSS
+        if user_feedback and template_html:
+            from pipeline.steps.dynamic_template import fix_template_from_critique
+            await status_msg.edit_text("✏️ Opus is adjusting the layout...")
+            critique_text = (
+                f"USER FEEDBACK — fix these issues in the HTML/CSS:\n\n"
+                f"[CRITICAL] user_feedback: {user_feedback}\n"
+                f"  → Fix: Apply the user's requested change to the template HTML/CSS.\n"
+            )
+            logger.info(f"[edit] Applying user feedback via Opus: {user_feedback}")
+            template_html = await fix_template_from_critique(template_html, critique_text, new_decisions)
+
         extra_images = post_data.get("extra_images")
         render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64, original_decisions=decisions, extra_images=extra_images)
 
         # Build change summary
         change_descriptions = []
+        if user_feedback:
+            change_descriptions.append(f"  • Layout adjusted: {user_feedback}")
         if needs_template_regen and logo_b64:
             change_descriptions.append(f"  • Added {client_name} logo")
         elif needs_template_regen and not logo_b64:
