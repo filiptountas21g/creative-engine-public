@@ -296,7 +296,13 @@ TOOLS = [
         ),
         "input_schema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "image_source": {
+                    "type": "string",
+                    "enum": ["auto", "stock", "ai"],
+                    "description": "Image source preference. 'stock' = stock photos only, 'ai' = AI-generated only, 'auto' = try stock first then AI. Use 'stock' when user asks for stock/real photos.",
+                },
+            },
             "required": [],
         },
     },
@@ -906,9 +912,10 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
     status_msg = await msg.reply_text("🔄 Finding a new image for this concept...")
 
     try:
+        image_source = params.get("image_source", "auto")
         pipeline_input = PipelineInput(client=client_name, brief=concept.object)
         brain_ctx = await brain_read(pipeline_input, brain)
-        new_image = await generate_image(concept, brain_ctx)
+        new_image = await generate_image(concept, brain_ctx, image_source=image_source)
         await status_msg.edit_text(f"🖼️ Got new image ({new_image.model_used}), re-rendering...")
 
         render_result = await render_post(
