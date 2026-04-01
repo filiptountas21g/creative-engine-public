@@ -573,7 +573,8 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
             emojis = {
                 "research": "🔍", "brain": "🧠", "concept": "💡",
                 "copy": "📝", "image": "📸", "decisions": "🎯",
-                "template": "📐", "render": "🖨️", "brain_write": "💾",
+                "template": "📐", "render": "🖨️", "critique": "👁️",
+                "fix": "🔧", "brain_write": "💾",
             }
             emoji = emojis.get(step, "⏳")
             await status_msg.edit_text(
@@ -643,7 +644,8 @@ async def _exec_generate_carousel(params: dict, user_id: int, msg) -> str:
             emojis = {
                 "research": "🔍", "brain": "🧠", "concept": "💡",
                 "copy": "📝", "image": "📸", "decisions": "🎯",
-                "template": "📐", "render": "🖨️", "brain_write": "💾",
+                "template": "📐", "render": "🖨️", "critique": "👁️",
+                "fix": "🔧", "brain_write": "💾",
                 "carousel": "🎠",
             }
             emoji = emojis.get(step, "⏳")

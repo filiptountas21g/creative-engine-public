@@ -205,6 +205,113 @@ Return the complete HTML file."""
         raise
 
 
+FIX_TEMPLATE_SYSTEM = """You are an expert HTML/CSS designer fixing a social media post template.
+
+You receive:
+1. The current HTML template
+2. A screenshot of how it renders (as a description of issues)
+3. Specific issues to fix
+
+Your job: return the FIXED HTML. Apply ALL the requested fixes.
+
+Rules:
+- Return ONLY the complete fixed HTML file. No explanation, no markdown fences.
+- Keep the same overall layout/structure — only fix the specific issues mentioned.
+- ALWAYS use CSS custom properties for colors: var(--color-bg), var(--color-text), var(--color-accent), var(--color-subtext), var(--client-color)
+- NEVER hardcode hex colors in the CSS
+- NEVER replace placeholders ({{HEADLINE}}, {{SUBTEXT}}, etc.) with actual text
+- Preserve all existing placeholders exactly as they are
+- Make the minimum changes needed to fix each issue
+- If the fix says "add more margin" → adjust the specific CSS property
+- If the fix says "improve contrast" → add a background overlay or adjust positioning
+- If the fix says "text overlapping" → adjust z-index, positioning, or add padding"""
+
+
+async def fix_template_from_critique(
+    current_html: str,
+    critique_text: str,
+    decisions: CreativeDecisions,
+) -> str:
+    """
+    Fix an HTML template based on visual critique feedback.
+
+    Takes the current HTML and critique instructions, returns fixed HTML.
+    """
+    user_prompt = f"""Fix this HTML template based on the visual review.
+
+CURRENT HTML:
+```html
+{current_html}
+```
+
+VISUAL REVIEW FEEDBACK:
+{critique_text}
+
+DESIGN DECISIONS (for reference):
+  Headline: {decisions.headline}
+  Font: {decisions.font_headline} ({decisions.font_headline_weight}), size {decisions.font_headline_size}px
+  Colors: bg={decisions.color_bg}, text={decisions.color_text}, accent={decisions.color_accent}
+  Template style: {decisions.template}
+
+Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
+
+    try:
+        response = _client.messages.create(
+            model=config.OPUS_MODEL,
+            max_tokens=8192,
+            system=FIX_TEMPLATE_SYSTEM,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+
+        html = response.content[0].text.strip()
+
+        # Strip markdown fences if present
+        if html.startswith("```"):
+            html = html.split("\n", 1)[1]
+            if html.endswith("```"):
+                html = html[:-3]
+            html = html.strip()
+
+        # Same post-processing as generate
+        _text_to_placeholder = {
+            decisions.headline: "{{HEADLINE}}",
+            decisions.subtext: "{{SUBTEXT}}",
+            decisions.cta: "{{CTA}}",
+        }
+        for actual_text, placeholder in _text_to_placeholder.items():
+            if actual_text and placeholder not in html and actual_text in html:
+                logger.info(f"Fix: replacing hardcoded '{actual_text[:40]}...' with {placeholder}")
+                html = html.replace(actual_text, placeholder, 1)
+
+        # Validate placeholders still present
+        required = ["{{HEADLINE}}", "{{IMAGE_PATH}}", "{{SUBTEXT}}", "{{CLIENT_NAME}}"]
+        missing = [p for p in required if p not in html]
+        if missing:
+            logger.warning(f"Fixed template missing placeholders: {missing} — keeping original for those")
+
+        # Post-process hardcoded colors
+        import re
+        _color_to_var = {
+            decisions.color_bg: "var(--color-bg)",
+            decisions.color_text: "var(--color-text)",
+            decisions.color_accent: "var(--color-accent)",
+            decisions.color_subtext: "var(--color-subtext)",
+        }
+        for hex_color, css_var in _color_to_var.items():
+            if not hex_color or len(hex_color) < 4:
+                continue
+            pattern = rf'(?<!--color-[a-z]+:\s*)(?<=[:;\s])({re.escape(hex_color)})(?=[;\s"\'\)])'
+            html = re.sub(pattern, css_var, html, flags=re.IGNORECASE)
+
+        logger.info(f"Fixed template generated ({len(html)} chars)")
+        return html
+
+    except Exception as e:
+        logger.error(f"Template fix failed: {e}")
+        # Return original HTML if fix fails
+        return current_html
+
+
 def _pick_reference(
     refs: list, liked: list, template_hint: str,
     previous_templates: list[str] | None = None,

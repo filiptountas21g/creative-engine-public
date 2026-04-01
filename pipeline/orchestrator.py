@@ -18,7 +18,8 @@ from pipeline.steps.copy import write_copy
 from pipeline.steps.image_gen import generate_image
 from pipeline.steps.decisions import creative_decisions
 from pipeline.steps.render import render
-from pipeline.steps.dynamic_template import generate_dynamic_template, get_client_preferences
+from pipeline.steps.dynamic_template import generate_dynamic_template, get_client_preferences, fix_template_from_critique
+from pipeline.steps.critique import critique_render, needs_revision, format_critique_for_fix
 from pipeline.steps.brain_write import brain_write
 
 logger = logging.getLogger(__name__)
@@ -125,11 +126,39 @@ async def run_pipeline(
         dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=has_logo)
         await _notify("template", "Layout ready")
 
-        # Step 7: Render (Playwright)
-        await _notify("render", "Rendering final PNG...")
-        render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html, logo_b64=logo_b64)
+        # Step 7: Render → Critique → Fix loop (max 2 revision passes)
+        MAX_REVISIONS = 2
+        current_html = dynamic_html
+
+        for iteration in range(1, MAX_REVISIONS + 2):  # 1 = first render, 2-3 = revisions
+            await _notify("render", f"Rendering {'final ' if iteration > MAX_REVISIONS else ''}PNG{f' (revision {iteration - 1})' if iteration > 1 else ''}...")
+            render_result = await render(decisions, image, input.client, dynamic_html=current_html, logo_b64=logo_b64)
+
+            # Skip critique on last allowed iteration or if we've done max revisions
+            if iteration > MAX_REVISIONS:
+                break
+
+            # Critique the render
+            await _notify("critique", f"Art director reviewing design (pass {iteration})...")
+            critique = await critique_render(
+                render_result.final_image_path, decisions, current_html, iteration=iteration,
+            )
+            score = critique.get("score", 5)
+            await _notify("critique", f"Score: {score}/10")
+
+            if not needs_revision(critique):
+                logger.info(f"Design approved at score {score}/10 on iteration {iteration}")
+                await _notify("critique", f"✓ Design approved ({score}/10)")
+                break
+
+            # Fix the template based on critique
+            critique_text = format_critique_for_fix(critique)
+            await _notify("fix", f"Fixing {len(critique.get('issues', []))} issues...")
+            current_html = await fix_template_from_critique(current_html, critique_text, decisions)
+            logger.info(f"Template fixed (iteration {iteration}), re-rendering...")
+
         result.image_path = render_result.final_image_path
-        result.template_html = dynamic_html
+        result.template_html = current_html
         result.logo_b64 = logo_b64
         await _notify("render", f"Rendered: {render_result.final_image_path}")
 
