@@ -70,6 +70,7 @@ async def critique_render(
     decisions: CreativeDecisions,
     template_html: str,
     iteration: int = 1,
+    forced_reference: dict | None = None,
 ) -> dict:
     """
     Have Claude Vision critique a rendered post.
@@ -84,6 +85,20 @@ async def critique_render(
 
     img_b64 = base64.b64encode(img_path.read_bytes()).decode("utf-8")
 
+    # Build reference context if we're replicating a specific design
+    reference_context = ""
+    if forced_reference:
+        from pipeline.steps.dynamic_template import _format_reference
+        ref_text = _format_reference(forced_reference, source="user's inspiration")
+        reference_context = (
+            f"\n\nIMPORTANT — REFERENCE LAYOUT TO MATCH:\n"
+            f"The user asked to replicate a specific inspiration image. "
+            f"The rendered post MUST match this layout structure:\n{ref_text}\n\n"
+            f"Judge primarily on how well it matches the REFERENCE LAYOUT — "
+            f"same grid structure, same text positioning, same visual hierarchy. "
+            f"Do NOT suggest changing the layout to something different from the reference."
+        )
+
     content = [
         {
             "type": "text",
@@ -97,7 +112,8 @@ async def critique_render(
                 f"  Colors: bg={decisions.color_bg}, text={decisions.color_text}, accent={decisions.color_accent}\n"
                 f"  Template style: {decisions.template}\n"
                 f"  Image padding: {decisions.image_padding}px\n"
-                f"  Headline position: margins ({decisions.headline_margin_x}px, {decisions.headline_margin_y}px)\n\n"
+                f"  Headline position: margins ({decisions.headline_margin_x}px, {decisions.headline_margin_y}px)\n"
+                f"{reference_context}\n\n"
                 f"Look at the rendered result and tell me what needs fixing.\n"
                 f"Be harsh but specific — this needs to look like it came from a top design agency."
             ),

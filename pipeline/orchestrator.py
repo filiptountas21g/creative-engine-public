@@ -145,7 +145,8 @@ async def run_pipeline(
             # Critique the render
             await _notify("critique", f"Art director reviewing design (pass {iteration})...")
             critique = await critique_render(
-                render_result.final_image_path, decisions, current_html, iteration=iteration,
+                render_result.final_image_path, decisions, current_html,
+                iteration=iteration, forced_reference=forced_reference,
             )
             score = critique.get("score", 5)
             await _notify("critique", f"Score: {score}/10")
