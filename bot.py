@@ -674,6 +674,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
                 "template_html": result.template_html,
                 "logo_b64": result.logo_b64,
                 "rendered_path": result.image_path,
+                "extra_images": result.extra_images,
             }
 
             if user_id not in _previous_decisions:
@@ -773,6 +774,7 @@ async def _exec_generate_carousel(params: dict, user_id: int, msg) -> str:
                 "template_html": getattr(last, 'template_html', ''),
                 "logo_b64": getattr(last, 'logo_b64', None),
                 "rendered_path": last.image_path,
+                "extra_images": getattr(last, 'extra_images', None),
             }
 
 
@@ -828,7 +830,8 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             logger.info(f"[edit] Regenerating HTML: {reason}")
             template_html = await generate_dynamic_template(new_decisions, brain, has_logo=logo_b64 is not None)
 
-        render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64, original_decisions=decisions)
+        extra_images = post_data.get("extra_images")
+        render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64, original_decisions=decisions, extra_images=extra_images)
 
         # Build change summary
         change_descriptions = []
@@ -856,8 +859,8 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             "template_html": template_html,
             "logo_b64": logo_b64,
             "rendered_path": render_result.final_image_path,
+            "extra_images": extra_images,
         }
-        _save_last_posts()
 
         return f"Post edited. Changes: {changes_text}"
 
@@ -891,9 +894,11 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
         new_image = await generate_image(concept, brain_ctx, image_source=image_source)
         await status_msg.edit_text(f"🖼️ Got new image ({new_image.model_used}), re-rendering...")
 
+        extra_images = post_data.get("extra_images")
         render_result = await render_post(
             decisions, new_image, client_name,
             dynamic_html=template_html, logo_b64=logo_b64,
+            extra_images=extra_images,
         )
 
         result_text = (
@@ -913,8 +918,8 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
             "template_html": template_html,
             "logo_b64": logo_b64,
             "rendered_path": render_result.final_image_path,
+            "extra_images": extra_images,
         }
-        _save_last_posts()
 
         return f"Image replaced ({new_image.model_used}). Same layout."
 

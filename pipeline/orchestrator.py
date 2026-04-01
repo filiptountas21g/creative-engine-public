@@ -178,6 +178,7 @@ async def run_pipeline(
         result.image_path = render_result.final_image_path
         result.template_html = current_html
         result.logo_b64 = logo_b64
+        result.extra_images = extra_images if extra_images else None
         await _notify("render", f"Rendered: {render_result.final_image_path}")
 
         # Step 8: Brain Write
