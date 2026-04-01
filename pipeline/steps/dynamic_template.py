@@ -186,13 +186,26 @@ Return the complete HTML file."""
         for hex_color, css_var in _color_to_var.items():
             if not hex_color or len(hex_color) < 4:
                 continue
-            # Don't replace inside CSS variable definitions (--color-*: #xxx)
-            # Only replace in property values and inline styles
-            pattern = rf'(?<!--color-[a-z]+:\s*)(?<=[:;\s])({re.escape(hex_color)})(?=[;\s"\'\)])'
-            matches = re.findall(pattern, html, flags=re.IGNORECASE)
-            if matches:
-                hardcoded_count += len(matches)
-                html = re.sub(pattern, css_var, html, flags=re.IGNORECASE)
+            # Replace hex colors in style contexts, but skip CSS variable definitions
+            escaped = re.escape(hex_color)
+            # Match color after : or ; or space, before ; or " or ' or )
+            pattern = rf'(?<=[:;\s])({escaped})(?=[;\s"\'\)])'
+            # First find all matches, then filter out ones in variable definitions
+            for match in re.finditer(pattern, html, flags=re.IGNORECASE):
+                start = match.start()
+                # Check if this is inside a CSS variable definition (--color-xxx: #hex)
+                prefix = html[max(0, start - 30):start]
+                if re.search(r'--color-\w+\s*:\s*$', prefix):
+                    continue  # Skip — this is the variable definition itself
+                hardcoded_count += 1
+            # Now do the replacement, skipping variable definitions
+            def _replace_if_not_var_def(m):
+                start = m.start()
+                prefix = html[max(0, start - 30):start]
+                if re.search(r'--color-\w+\s*:\s*$', prefix):
+                    return m.group(0)  # Keep original
+                return css_var
+            html = re.sub(pattern, _replace_if_not_var_def, html, flags=re.IGNORECASE)
 
         if hardcoded_count > 0:
             logger.info(f"Replaced {hardcoded_count} hardcoded color values with CSS variables in template")
@@ -300,8 +313,15 @@ Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
         for hex_color, css_var in _color_to_var.items():
             if not hex_color or len(hex_color) < 4:
                 continue
-            pattern = rf'(?<!--color-[a-z]+:\s*)(?<=[:;\s])({re.escape(hex_color)})(?=[;\s"\'\)])'
-            html = re.sub(pattern, css_var, html, flags=re.IGNORECASE)
+            escaped = re.escape(hex_color)
+            pattern = rf'(?<=[:;\s])({escaped})(?=[;\s"\'\)])'
+            def _replace_if_not_var_def_fix(m, _css_var=css_var):
+                start = m.start()
+                prefix = html[max(0, start - 30):start]
+                if re.search(r'--color-\w+\s*:\s*$', prefix):
+                    return m.group(0)
+                return _css_var
+            html = re.sub(pattern, _replace_if_not_var_def_fix, html, flags=re.IGNORECASE)
 
         logger.info(f"Fixed template generated ({len(html)} chars)")
         return html
