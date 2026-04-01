@@ -69,6 +69,67 @@ _last_post_by_user: dict[int, dict] = {}
 # Track previous decisions per user for variety
 _previous_decisions: dict[int, list[dict]] = {}
 
+# ── Sliding conversation memory ─────────────────────────
+# Keeps recent posts and analyses available for ~15 messages, auto-prunes
+MEMORY_TTL_MESSAGES = 15
+
+_message_counter: dict[int, int] = {}
+_conversation_memory: dict[int, list[dict]] = {}  # list of {"type", "data", "msg_num", "label"}
+
+
+def _bump_message_counter(user_id: int) -> int:
+    """Increment message counter and prune old memory entries."""
+    _message_counter[user_id] = _message_counter.get(user_id, 0) + 1
+    count = _message_counter[user_id]
+
+    # Prune entries older than MEMORY_TTL_MESSAGES
+    if user_id in _conversation_memory:
+        _conversation_memory[user_id] = [
+            entry for entry in _conversation_memory[user_id]
+            if count - entry["msg_num"] < MEMORY_TTL_MESSAGES
+        ]
+    return count
+
+
+def _remember(user_id: int, entry_type: str, data: dict, label: str = ""):
+    """Store something in conversation memory with the current message number."""
+    if user_id not in _conversation_memory:
+        _conversation_memory[user_id] = []
+
+    _conversation_memory[user_id].append({
+        "type": entry_type,  # "analysis", "post", "reference"
+        "data": data,
+        "msg_num": _message_counter.get(user_id, 0),
+        "label": label,
+    })
+
+    # Cap at 10 entries max per user
+    if len(_conversation_memory[user_id]) > 10:
+        _conversation_memory[user_id] = _conversation_memory[user_id][-10:]
+
+
+def _get_memory_context(user_id: int) -> str:
+    """Build a summary of conversation memory for the system prompt."""
+    if user_id not in _conversation_memory or not _conversation_memory[user_id]:
+        return ""
+
+    current_msg = _message_counter.get(user_id, 0)
+    lines = ["\nConversation memory (recent items, auto-expires):"]
+    for entry in _conversation_memory[user_id]:
+        age = current_msg - entry["msg_num"]
+        freshness = "just now" if age <= 1 else f"{age} msgs ago"
+        if entry["type"] == "analysis":
+            analysis = entry["data"]
+            lines.append(f"  📸 Reference analysis ({freshness}): {entry['label']}")
+        elif entry["type"] == "post":
+            post = entry["data"]
+            d = post.get("decisions")
+            client = post.get("client", "?")
+            headline = d.headline if d else "?"
+            lines.append(f"  🖼️ Generated post ({freshness}): {client} — \"{headline}\"")
+
+    return "\n".join(lines)
+
 
 def _add_to_history(user_id: int, role: str, content):
     """Add a message to user's conversation history.
@@ -384,7 +445,8 @@ Rules:
 - COLOR CHANGES: When user says "replace X with Y", change ALL fields containing that color (color_bg, color_accent, color_text, color_subtext). Use DISTINCT, clearly different hex values — never subtle variations.
   Reference: Red=#DC2626, Orange=#EA580C, Amber=#D97706, Yellow=#EAB308, Lime=#65A30D, Green=#16A34A, Emerald=#059669, Teal=#0D9488, Cyan=#0891B2, Sky=#0284C7, Blue=#2563EB, Indigo=#4F46E5, Violet=#7C3AED, Purple=#9333EA, Fuchsia=#C026D3, Pink=#DB2777, Rose=#E11D48, White=#FFFFFF, Black=#000000, Gray=#6B7280, Beige=#F5F0E8, Navy=#1E3A5F, Burgundy=#800020, Gold=#FFD700, Coral=#FF6B6B, Turquoise=#40E0D0, Peach=#FFCBA4, Lavender=#E6E6FA, Mint=#98FB98, Cream=#FFFDD0, Charcoal=#36454F
 - STOCK PHOTOS: When user asks to "use stock photos", "use real photos", "no AI images", "use actual photos", or anything similar → set image_source="stock" on generate_post. This is CRITICAL. Default is "auto".
-- INSPIRATION POSTS: When user sends an image and says "make a post like this", "similar to this one", "based on this" → set use_last_inspiration=true on generate_post. This makes the template replicate the layout of THAT specific image. Do NOT set this for normal posts."""
+- INSPIRATION POSTS: When user sends an image and says "make a post like this", "similar to this one", "based on this" → set use_last_inspiration=true on generate_post. This makes the template replicate the layout of THAT specific image. Do NOT set this for normal posts.
+{_get_memory_context(user_id)}"""
 
 
 # ── Photo handler (taste ingestion + logo detection) ─────
@@ -397,6 +459,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     photo = msg.photo[-1]
     caption = msg.caption or ""
     user_id = msg.from_user.id if msg.from_user else 0
+    _bump_message_counter(user_id)
     history_text = _get_history_text_simple(user_id)
 
     status_msg = await msg.reply_text("🔍 Looking at this...")
@@ -442,6 +505,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Send in chunks if too long for Telegram (4096 char limit)
         # Save analysis BEFORE trying to send — so "make like this" works even if send fails
         _last_analysis_by_user[user_id] = analysis
+        _remember(user_id, "analysis", analysis, label=analysis.get("summary", caption or "inspiration image")[:60])
         _add_to_history(user_id, "user", f"[sent inspiration photo] {caption}")
         _add_to_history(user_id, "assistant", analysis_text[:300])
 
@@ -720,7 +784,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
             await msg.reply_text(result_text, parse_mode="HTML")
 
         if result.decisions and result.hero_image:
-            _last_post_by_user[user_id] = {
+            post_data = {
                 "decisions": result.decisions,
                 "image": result.hero_image,
                 "concept": result.concept,
@@ -730,6 +794,8 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
                 "rendered_path": result.image_path,
                 "extra_images": result.extra_images,
             }
+            _last_post_by_user[user_id] = post_data
+            _remember(user_id, "post", post_data, label=f"{client_name}: {result.decisions.headline[:40]}")
 
             if user_id not in _previous_decisions:
                 _previous_decisions[user_id] = []
@@ -1218,6 +1284,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = msg.from_user.id if msg.from_user else 0
     logger.info(f"[text] Received from {user_id}: {text[:80]}")
 
+    _bump_message_counter(user_id)
     _add_to_history(user_id, "user", text)
     await _run_tool_use_loop(user_id, msg)
 
