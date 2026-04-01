@@ -161,11 +161,36 @@ For example, "split" doesn't have to be a strict 50/50 split — it could be 30/
 Return the complete HTML file."""
 
     try:
+        # Build message content — include the actual inspiration image if available
+        message_content = []
+
+        # If we have the actual inspiration image, send it to Opus so it can SEE the reference
+        reference_image_b64 = None
+        if forced_reference and isinstance(forced_reference, dict):
+            reference_image_b64 = forced_reference.get("_image_b64")
+
+        if reference_image_b64:
+            message_content.append({
+                "type": "text",
+                "text": "REFERENCE IMAGE (replicate this layout):"
+            })
+            message_content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": reference_image_b64,
+                }
+            })
+            logger.info("Sending actual inspiration image to Opus for template generation")
+
+        message_content.append({"type": "text", "text": user_prompt})
+
         response = _client.messages.create(
             model=config.OPUS_MODEL,
             max_tokens=8192,
             system=TEMPLATE_SYSTEM,
-            messages=[{"role": "user", "content": user_prompt}],
+            messages=[{"role": "user", "content": message_content}],
         )
 
         html = response.content[0].text.strip()

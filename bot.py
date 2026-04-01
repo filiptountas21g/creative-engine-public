@@ -574,8 +574,14 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             analysis_text = f"🏷️ Tagged for: <b>{client}</b>\n\n" + analysis_text
 
         # Send in chunks if too long for Telegram (4096 char limit)
-        # Save analysis BEFORE trying to send — so "make like this" works even if send fails
+        # Save analysis + image bytes BEFORE trying to send — so "make like this" works even if send fails
+        import base64
         _last_analysis_by_user[user_id] = analysis
+        try:
+            img_b64 = base64.b64encode(tmp_path.read_bytes()).decode("utf-8")
+            _last_analysis_by_user[user_id]["_image_b64"] = img_b64
+        except Exception:
+            pass
         _remember(user_id, "analysis", analysis, label=analysis.get("summary", caption or "inspiration image")[:60])
         _add_to_history(user_id, "user", f"[sent inspiration photo] {caption}")
         _add_to_history(user_id, "assistant", analysis_text[:300])
