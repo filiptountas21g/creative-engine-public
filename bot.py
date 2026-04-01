@@ -149,6 +149,26 @@ TOOLS = [
                     "type": "boolean",
                     "description": "Set to true ONLY when the user explicitly asks to make a post 'like this', 'similar to this', 'based on this' referring to an inspiration image they just sent. This forces the template to replicate that specific layout. Do NOT set this when generating a normal post.",
                 },
+                "style_overrides": {
+                    "type": "object",
+                    "description": (
+                        "Override specific design decisions AFTER the AI picks them. Use when the user "
+                        "specifies constraints like 'use black and white', 'use Montserrat font', 'make it red'. "
+                        "Any field from edit_post works here: color_bg, color_text, color_accent, color_subtext, "
+                        "font_headline, font_headline_weight, font_headline_size, font_headline_case, etc."
+                    ),
+                    "properties": {
+                        "color_bg": {"type": "string"},
+                        "color_text": {"type": "string"},
+                        "color_accent": {"type": "string"},
+                        "color_subtext": {"type": "string"},
+                        "font_headline": {"type": "string"},
+                        "font_headline_weight": {"type": "integer"},
+                        "font_headline_size": {"type": "integer"},
+                        "font_headline_case": {"type": "string"},
+                        "font_subtext": {"type": "string"},
+                    },
+                },
             },
             "required": ["client", "brief"],
         },
@@ -645,9 +665,32 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
         except Exception:
             pass
 
+    style_overrides = params.get("style_overrides", {})
+
     pipeline_input = PipelineInput(client=client_name, brief=brief, platform=platform)
     prev = _previous_decisions.get(user_id)
     result = await run_pipeline(pipeline_input, brain, on_progress=on_progress, previous_decisions=prev, image_source=image_source, forced_reference=forced_reference)
+
+    # Apply style overrides — user specified colors/fonts that override the AI's choices
+    if style_overrides and result.success and result.decisions:
+        from dataclasses import replace as dc_replace
+        overrides = {k: v for k, v in style_overrides.items() if hasattr(result.decisions, k)}
+        if overrides:
+            logger.info(f"Applying style overrides: {overrides}")
+            result.decisions = dc_replace(result.decisions, **overrides)
+            # Re-render with overridden decisions
+            try:
+                await status_msg.edit_text(f"🎨 Applying your style preferences...")
+                from pipeline.steps.render import render as render_fn
+                render_result = await render_fn(
+                    result.decisions, result.hero_image, client_name,
+                    dynamic_html=result.template_html, logo_b64=result.logo_b64,
+                    extra_images=result.extra_images,
+                )
+                result.image_path = render_result.final_image_path
+            except Exception as e:
+                logger.error(f"Re-render with overrides failed: {e}")
+
     result_text = format_result_for_telegram(result, pipeline_input)
 
     if result.success and result.image_path:
