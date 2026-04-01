@@ -24,6 +24,7 @@ def _inject_into_template(
     client_name: str,
     logo_b64: str | None = None,
     original_decisions: CreativeDecisions | None = None,
+    extra_images: list[ImageResult] | None = None,
 ) -> str:
     """Replace placeholders and CSS variables in the HTML template."""
     # Build Google Fonts URL (both headline and subtext)
@@ -44,16 +45,37 @@ def _inject_into_template(
     html = html.replace("{{CTA}}", decisions.cta)
     html = html.replace("{{CLIENT_NAME}}", client_name.upper())
 
-    # Image — embed as base64 data URI so it always loads in Playwright
-    img_path = Path(image.image_path).resolve()
+    # Images — embed as base64 data URIs so they always load in Playwright
     import base64
-    try:
-        img_bytes = img_path.read_bytes()
-        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-        img_src = f"data:image/png;base64,{img_b64}"
-    except Exception:
-        img_src = f"file://{img_path}"
+
+    def _image_to_data_uri(img_result: ImageResult) -> str:
+        try:
+            p = Path(img_result.image_path).resolve()
+            b = base64.b64encode(p.read_bytes()).decode("utf-8")
+            return f"data:image/png;base64,{b}"
+        except Exception:
+            return f"file://{Path(img_result.image_path).resolve()}"
+
+    # Primary image — replaces both {{IMAGE_PATH}} and {{IMAGE_1}}
+    img_src = _image_to_data_uri(image)
     html = html.replace("{{IMAGE_PATH}}", img_src)
+    html = html.replace("{{IMAGE_1}}", img_src)
+
+    # Additional images — {{IMAGE_2}} through {{IMAGE_6}}
+    all_images = extra_images or []
+    for i, extra_img in enumerate(all_images, start=2):
+        placeholder = f"{{{{IMAGE_{i}}}}}"
+        if placeholder in html:
+            extra_src = _image_to_data_uri(extra_img)
+            html = html.replace(placeholder, extra_src)
+
+    # Remove any unfilled image placeholders (broken img tags look bad)
+    import re
+    for i in range(1, 7):
+        placeholder = f"{{{{IMAGE_{i}}}}}"
+        if placeholder in html:
+            logger.warning(f"Unfilled placeholder {placeholder} — removing img tag")
+            html = re.sub(rf'<img[^>]*\{{\{{IMAGE_{i}\}}\}}[^>]*/?\s*>', '', html)
 
     # Logo — inject if available, otherwise remove placeholder
     if logo_b64 and "{{LOGO_PATH}}" in html:
@@ -111,10 +133,19 @@ def _inject_into_template(
     }
     for hex_color, css_var in _old_color_to_var.items():
         if hex_color and len(hex_color) >= 4:
-            # Replace in style contexts (after : or ; or space, before ; or " or ')
+            # Aggressive replacement: replace hex color anywhere in CSS/style contexts.
+            # Matches after : ; = space or start of value, before ; } " ' space newline or end.
+            # Skip if already inside a var() or CSS variable definition (--color-xxx:).
+            def _replace_color(match):
+                # Don't replace inside CSS variable definitions (e.g. --color-text: #1A1A1A)
+                start = max(0, match.start() - 30)
+                prefix = html[start:match.start()]
+                if re.search(r'--color-\w+\s*:\s*$', prefix):
+                    return match.group(0)
+                return css_var
             html = re.sub(
-                rf'(?<=[:;\s])({re.escape(hex_color)})(?=[;\s"\'])',
-                css_var,
+                re.escape(hex_color),
+                _replace_color,
                 html,
                 flags=re.IGNORECASE,
             )
@@ -129,6 +160,7 @@ async def render(
     dynamic_html: str | None = None,
     logo_b64: str | None = None,
     original_decisions: CreativeDecisions | None = None,
+    extra_images: list[ImageResult] | None = None,
 ) -> RenderResult:
     """
     Render the final post as a 1080x1080 PNG.
@@ -151,7 +183,7 @@ async def render(
             template_html = template_path.read_text(encoding="utf-8")
 
     # Inject decisions
-    final_html = _inject_into_template(template_html, decisions, image, client_name, logo_b64, original_decisions)
+    final_html = _inject_into_template(template_html, decisions, image, client_name, logo_b64, original_decisions, extra_images=extra_images)
 
     # Generate output path
     output_dir = Path(config.OUTPUT_DIR)
