@@ -130,11 +130,14 @@ def _inject_into_template(
         font-size: var(--font-subtext-size) !important;
         color: var(--color-subtext) !important;
       }}
-      [class*="cta" i], [class*="button" i], [class*="action" i] {{
-        color: var(--color-accent) !important;
+      [class*="cta" i], [class*="button" i], [class*="action" i], [class*="btn" i] {{
+        background-color: var(--color-accent) !important;
+        border-color: var(--color-accent) !important;
+        color: var(--color-bg) !important;
       }}
-      [class*="accent" i], [class*="label" i], [class*="tag" i], [class*="badge" i] {{
+      [class*="accent" i], [class*="label" i], [class*="tag" i], [class*="badge" i], [class*="pill" i] {{
         color: var(--color-accent) !important;
+        border-color: var(--color-accent) !important;
       }}
       [class*="client" i], [class*="brand" i], [class*="logo-text" i] {{
         color: var(--client-color) !important;
