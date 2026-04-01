@@ -481,23 +481,41 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             analysis_text = f"🏷️ Tagged for: <b>{client}</b>\n\n" + analysis_text
 
         # Send in chunks if too long for Telegram (4096 char limit)
-        reply = None
-        if len(analysis_text) <= 4000:
-            reply = await msg.reply_text(analysis_text, parse_mode="HTML")
-        else:
-            chunks = [analysis_text[i:i + 4000] for i in range(0, len(analysis_text), 4000)]
-            for chunk in chunks:
-                reply = await msg.reply_text(chunk, parse_mode="HTML")
-
-        if reply:
-            _analysis_by_msg[reply.message_id] = analysis
+        # Save analysis BEFORE trying to send — so "make like this" works even if send fails
         _last_analysis_by_user[user_id] = analysis
         _add_to_history(user_id, "user", f"[sent inspiration photo] {caption}")
         _add_to_history(user_id, "assistant", analysis_text[:300])
 
+        # Try HTML first, fall back to plain text if Telegram rejects the formatting
+        reply = None
+        try:
+            if len(analysis_text) <= 4000:
+                reply = await msg.reply_text(analysis_text, parse_mode="HTML")
+            else:
+                chunks = [analysis_text[i:i + 4000] for i in range(0, len(analysis_text), 4000)]
+                for chunk in chunks:
+                    reply = await msg.reply_text(chunk, parse_mode="HTML")
+        except Exception as html_err:
+            logger.warning(f"HTML parse failed, sending as plain text: {html_err}")
+            # Strip HTML tags and send as plain text
+            import re as _re
+            plain = _re.sub(r'<[^>]+>', '', analysis_text)
+            if len(plain) <= 4000:
+                reply = await msg.reply_text(plain)
+            else:
+                chunks = [plain[i:i + 4000] for i in range(0, len(plain), 4000)]
+                for chunk in chunks:
+                    reply = await msg.reply_text(chunk)
+
+        if reply:
+            _analysis_by_msg[reply.message_id] = analysis
+
     except Exception as e:
         logger.error(f"Photo analysis failed: {e}")
-        await status_msg.edit_text(f"❌ Analysis failed: {str(e)[:200]}")
+        try:
+            await status_msg.edit_text(f"❌ Analysis failed: {str(e)[:200]}")
+        except Exception:
+            pass  # Status message may already be deleted
 
 
 def _get_history_text_simple(user_id: int) -> str:
