@@ -86,7 +86,7 @@ def _inject_into_template(
         import re
         html = re.sub(r'<img[^>]*\{\{LOGO_PATH\}\}[^>]*/?\s*>', '', html)
 
-    # Inject CSS variable overrides
+    # Inject CSS variable overrides + force-override block
     css_overrides = f"""
     <style>
       :root {{
@@ -110,6 +110,39 @@ def _inject_into_template(
         --image-object-fit: contain;
         --client-color: {decisions.color_accent};
       }}
+
+      /* Force overrides — ensures edits always take effect over hardcoded values */
+      body {{
+        background-color: var(--color-bg) !important;
+      }}
+      [class*="headline" i], [class*="title" i], [class*="heading" i], h1, h2 {{
+        font-family: var(--font-headline), sans-serif !important;
+        font-weight: var(--font-headline-weight) !important;
+        font-size: var(--font-headline-size) !important;
+        letter-spacing: var(--font-headline-tracking) !important;
+        line-height: var(--font-headline-line-height) !important;
+        text-transform: var(--font-headline-case) !important;
+        color: var(--color-text) !important;
+      }}
+      [class*="subtext" i], [class*="description" i], [class*="body-text" i], [class*="subtitle" i] {{
+        font-family: var(--font-subtext), sans-serif !important;
+        font-weight: var(--font-subtext-weight) !important;
+        font-size: var(--font-subtext-size) !important;
+        color: var(--color-subtext) !important;
+      }}
+      [class*="cta" i], [class*="button" i], [class*="action" i] {{
+        color: var(--color-accent) !important;
+      }}
+      [class*="accent" i], [class*="label" i], [class*="tag" i], [class*="badge" i] {{
+        color: var(--color-accent) !important;
+      }}
+      [class*="client" i], [class*="brand" i], [class*="logo-text" i] {{
+        color: var(--client-color) !important;
+      }}
+      [class*="hero" i] > img, [class*="image" i] > img, .hero-image {{
+        padding: var(--image-padding) !important;
+        object-fit: var(--image-object-fit) !important;
+      }}
     </style>
     """
 
@@ -119,11 +152,8 @@ def _inject_into_template(
     else:
         html = f"<head>\n{font_links}\n{css_overrides}\n</head>\n{html}"
 
-    # Fix hardcoded colors: Opus sometimes writes inline hex colors instead of var(--color-xxx).
-    # When editing, the template HTML has the OLD colors hardcoded. Replace them with CSS variables
-    # so the new decisions' colors take effect.
+    # Fix hardcoded colors: replace old hex values with CSS variables
     import re
-    # Use original decisions (pre-edit) if available, otherwise use current decisions
     src = original_decisions or decisions
     _old_color_to_var = {
         src.color_bg: "var(--color-bg)",
@@ -133,19 +163,35 @@ def _inject_into_template(
     }
     for hex_color, css_var in _old_color_to_var.items():
         if hex_color and len(hex_color) >= 4:
-            # Aggressive replacement: replace hex color anywhere in CSS/style contexts.
-            # Matches after : ; = space or start of value, before ; } " ' space newline or end.
-            # Skip if already inside a var() or CSS variable definition (--color-xxx:).
-            def _replace_color(match):
-                # Don't replace inside CSS variable definitions (e.g. --color-text: #1A1A1A)
+            def _replace_color(match, _css_var=css_var, _html=html):
                 start = max(0, match.start() - 30)
-                prefix = html[start:match.start()]
-                if re.search(r'--color-\w+\s*:\s*$', prefix):
+                prefix = _html[start:match.start()]
+                if re.search(r'--[\w-]+\s*:\s*$', prefix):
                     return match.group(0)
-                return css_var
+                return _css_var
             html = re.sub(
                 re.escape(hex_color),
                 _replace_color,
+                html,
+                flags=re.IGNORECASE,
+            )
+
+    # Fix hardcoded fonts: replace old font names with CSS variables
+    if original_decisions:
+        old_headline_font = original_decisions.font_headline
+        old_subtext_font = original_decisions.font_subtext
+        if old_headline_font and old_headline_font != decisions.font_headline:
+            # Replace font-family declarations containing the old font
+            html = re.sub(
+                rf"font-family:\s*['\"]?{re.escape(old_headline_font)}['\"]?",
+                "font-family: var(--font-headline)",
+                html,
+                flags=re.IGNORECASE,
+            )
+        if old_subtext_font and old_subtext_font != decisions.font_subtext:
+            html = re.sub(
+                rf"font-family:\s*['\"]?{re.escape(old_subtext_font)}['\"]?",
+                "font-family: var(--font-subtext)",
                 html,
                 flags=re.IGNORECASE,
             )
