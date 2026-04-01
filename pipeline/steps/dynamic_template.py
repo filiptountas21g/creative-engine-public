@@ -42,14 +42,23 @@ Placeholders (MANDATORY — the render engine replaces these):
   {{FONT_URL}} — Google Fonts link href
   {{HEADLINE}} — main headline text
   {{SUBTEXT}} — supporting text
-  {{IMAGE_PATH}} — hero image (MUST be an <img> tag, NOT CSS background-image)
+  {{IMAGE_1}} — primary hero image (MUST be an <img> tag, NOT CSS background-image)
+  {{IMAGE_2}}, {{IMAGE_3}}, {{IMAGE_4}}, {{IMAGE_5}}, {{IMAGE_6}} — OPTIONAL additional images
+  {{IMAGE_PATH}} — alias for {{IMAGE_1}} (both work)
   {{CTA}} — call to action text
   {{CLIENT_NAME}} — client name for footer label
   {{LOGO_PATH}} — OPTIONAL client logo (only include if has_logo is true). Place it small (40-60px) in a corner.
 
+MULTIPLE IMAGES: If the layout needs multiple images (e.g. a grid of speakers, a photo collage,
+  a background + foreground), use {{IMAGE_1}}, {{IMAGE_2}}, etc. The render engine will source
+  a separate image for each slot. You can use up to 6 images. Example:
+  <img src="{{IMAGE_1}}" alt="speaker 1">
+  <img src="{{IMAGE_2}}" alt="speaker 2">
+  Use multiple images when the reference has multiple photos or when the layout benefits from it.
+
 CRITICAL RULES:
-- Every template MUST include <img src="{{IMAGE_PATH}}"> for the hero image
-- Do NOT use background-image CSS for the hero
+- Every template MUST include at least <img src="{{IMAGE_1}}"> (or {{IMAGE_PATH}})
+- Do NOT use background-image CSS for images
 - Make each layout genuinely different — vary grid structures, text placement, image sizing, decorative elements
 - Use the inspiration as a starting point, not a copy
 - Be creative with layout: overlapping elements, asymmetric grids, text over image, sidebar layouts, diagonal cuts, etc.
@@ -115,7 +124,13 @@ Do NOT just use it as a starting point — CLOSELY MATCH the structure:
 - Same use of shapes, badges, labels if present
 - Adapt the CONTENT (headline, colors, fonts) to the client's brand but keep the STRUCTURE identical
 - If the reference has rounded badges, use rounded badges. If it has a date section, include a date-like element.
-- If the reference has headshots/photos in a row, use {{IMAGE_PATH}} for the hero but maintain the layout structure."""
+- CRITICAL FOR MULTI-PHOTO LAYOUTS: If the reference has multiple photos (e.g. speaker headshots in a row, a grid of portraits), you MUST use separate image placeholders for EACH photo slot:
+  <img src="{{IMAGE_1}}" alt="speaker 1">
+  <img src="{{IMAGE_2}}" alt="speaker 2">
+  <img src="{{IMAGE_3}}" alt="speaker 3">
+  <img src="{{IMAGE_4}}" alt="speaker 4">
+  Do NOT use colored divs or placeholder boxes. Use actual <img> tags with {{IMAGE_N}} placeholders.
+  The render engine will fill each slot with a different stock photo or AI-generated image."""
 
     uniqueness_instruction = ""
     if not forced_reference:
@@ -175,15 +190,17 @@ Return the complete HTML file."""
                 html = html.replace(actual_text, placeholder, 1)  # Replace first occurrence only
 
         # Validate required placeholders
-        required = ["{{HEADLINE}}", "{{IMAGE_PATH}}", "{{SUBTEXT}}", "{{CLIENT_NAME}}"]
+        has_any_image = "{{IMAGE_PATH}}" in html or "{{IMAGE_1}}" in html
+        required = ["{{HEADLINE}}", "{{SUBTEXT}}", "{{CLIENT_NAME}}"]
         missing = [p for p in required if p not in html]
+        if not has_any_image:
+            logger.warning("No image placeholder found — patching with {{IMAGE_1}}")
+            html = html.replace(
+                "</body>",
+                '<img src="{{IMAGE_1}}" style="position:absolute;top:0;right:0;width:50%;height:100%;object-fit:cover;" alt="hero">\n</body>'
+            )
         if missing:
             logger.warning(f"Dynamic template missing placeholders: {missing} — patching...")
-            if "{{IMAGE_PATH}}" not in html:
-                html = html.replace(
-                    "</body>",
-                    '<img src="{{IMAGE_PATH}}" style="position:absolute;top:0;right:0;width:50%;height:100%;object-fit:cover;" alt="hero">\n</body>'
-                )
             if "{{HEADLINE}}" not in html:
                 html = html.replace(
                     "</body>",
@@ -324,7 +341,8 @@ Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
                 html = html.replace(actual_text, placeholder, 1)
 
         # Validate placeholders still present
-        required = ["{{HEADLINE}}", "{{IMAGE_PATH}}", "{{SUBTEXT}}", "{{CLIENT_NAME}}"]
+        has_any_image = "{{IMAGE_PATH}}" in html or "{{IMAGE_1}}" in html
+        required = ["{{HEADLINE}}", "{{SUBTEXT}}", "{{CLIENT_NAME}}"]
         missing = [p for p in required if p not in html]
         if missing:
             logger.warning(f"Fixed template missing placeholders: {missing} — keeping original for those")
