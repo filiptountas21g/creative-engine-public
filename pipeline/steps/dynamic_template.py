@@ -71,20 +71,29 @@ async def generate_dynamic_template(
     brain: Brain,
     previous_templates: list[str] | None = None,
     has_logo: bool = False,
+    forced_reference: dict | None = None,
 ) -> str:
     """
-    Generate a fresh HTML template based on a random inspiration reference.
+    Generate a fresh HTML template based on an inspiration reference.
+
+    If forced_reference is provided (e.g. from a user-sent inspiration image),
+    use it directly instead of picking randomly from Brain.
 
     Returns the HTML string ready for injection.
     """
-    # Get all inspiration references
-    refs = brain.query(topic="taste_reference", limit=50)
+    if forced_reference:
+        # User just sent this inspiration and said "make something like this"
+        reference_text = _format_reference(forced_reference)
+        logger.info("Using forced inspiration reference from user's latest image")
+    else:
+        # Get all inspiration references
+        refs = brain.query(topic="taste_reference", limit=50)
 
-    # Get liked templates (higher priority)
-    liked = brain.query(topic="liked_template", limit=20)
+        # Get liked templates (higher priority)
+        liked = brain.query(topic="liked_template", limit=20)
 
-    # Pick a reference to inspire the layout
-    reference_text = _pick_reference(refs, liked, decisions.template, previous_templates)
+        # Pick a reference to inspire the layout
+        reference_text = _pick_reference(refs, liked, decisions.template, previous_templates)
 
     # Build the prompt
     avoid_text = ""
@@ -94,9 +103,31 @@ async def generate_dynamic_template(
             avoid_text += f"  {i}. {desc}\n"
         avoid_text += "Make something VISUALLY DIFFERENT from all of the above."
 
-    user_prompt = f"""Create a unique HTML template for this post.
+    replication_instruction = ""
+    if forced_reference:
+        replication_instruction = """
+IMPORTANT: The user specifically asked to REPLICATE this layout.
+Do NOT just use it as a starting point — CLOSELY MATCH the structure:
+- Same overall grid/composition (e.g. if it has a 4-column grid of photos, make a grid)
+- Same text positioning (top, bottom, left, right)
+- Same spacing proportions
+- Same visual hierarchy
+- Same use of shapes, badges, labels if present
+- Adapt the CONTENT (headline, colors, fonts) to the client's brand but keep the STRUCTURE identical
+- If the reference has rounded badges, use rounded badges. If it has a date section, include a date-like element.
+- If the reference has headshots/photos in a row, use {{IMAGE_PATH}} for the hero but maintain the layout structure."""
 
-INSPIRATION REFERENCE (use as creative starting point):
+    uniqueness_instruction = ""
+    if not forced_reference:
+        uniqueness_instruction = """
+Make this layout UNIQUE. Don't default to basic split or centered layouts every time.
+Consider: asymmetric compositions, overlapping elements, creative image cropping,
+bold geometric shapes, editorial magazine layouts, minimal with dramatic whitespace,
+text integrated into the image area, etc."""
+
+    user_prompt = f"""Create an HTML template for this post.
+
+{"REFERENCE TO REPLICATE (match this layout closely):" if forced_reference else "INSPIRATION REFERENCE (use as creative starting point):"}
 {reference_text}
 
 CREATIVE DECISIONS FOR THIS POST:
@@ -104,17 +135,13 @@ CREATIVE DECISIONS FOR THIS POST:
   Headline: {decisions.headline}
   Font: {decisions.font_headline} ({decisions.font_headline_weight})
   Colors: bg={decisions.color_bg}, text={decisions.color_text}, accent={decisions.color_accent}
-
+{replication_instruction}
 The template style hint is just a suggestion — you can interpret it freely.
 For example, "split" doesn't have to be a strict 50/50 split — it could be 30/70, or angled, or overlapping.
 {avoid_text}
 
 {"Include a small logo (40-60px) in a tasteful position using: <img src=\"{{LOGO_PATH}}\" ...>. The client has a logo on file." if has_logo else "No client logo available — use {{CLIENT_NAME}} text label instead."}
-
-Make this layout UNIQUE. Don't default to basic split or centered layouts every time.
-Consider: asymmetric compositions, overlapping elements, creative image cropping,
-bold geometric shapes, editorial magazine layouts, minimal with dramatic whitespace,
-text integrated into the image area, etc.
+{uniqueness_instruction}
 
 Return the complete HTML file."""
 

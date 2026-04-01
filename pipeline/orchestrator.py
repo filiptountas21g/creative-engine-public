@@ -44,6 +44,7 @@ async def run_pipeline(
     on_progress=None,
     previous_decisions: list[dict] | None = None,
     image_source: str = "auto",
+    forced_reference: dict | None = None,
 ) -> PipelineResult:
     """
     Run the full creative generation pipeline.
@@ -122,8 +123,11 @@ async def run_pipeline(
             await _notify("template", f"Found logo for {input.client}")
 
         # Step 6b: Dynamic Template (Opus generates fresh layout from inspiration)
-        await _notify("template", "Generating unique layout from your inspiration...")
-        dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=has_logo)
+        if forced_reference:
+            await _notify("template", "Replicating the layout from your inspiration image...")
+        else:
+            await _notify("template", "Generating unique layout from your inspiration...")
+        dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=has_logo, forced_reference=forced_reference)
         await _notify("template", "Layout ready")
 
         # Step 7: Render → Critique → Fix loop (max 2 revision passes)
