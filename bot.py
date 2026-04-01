@@ -760,7 +760,7 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             logger.info(f"[edit] Regenerating HTML: {reason}")
             template_html = await generate_dynamic_template(new_decisions, brain, has_logo=logo_b64 is not None)
 
-        render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64)
+        render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64, original_decisions=decisions)
 
         # Build change summary
         change_descriptions = []

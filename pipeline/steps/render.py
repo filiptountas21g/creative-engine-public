@@ -23,6 +23,7 @@ def _inject_into_template(
     image: ImageResult,
     client_name: str,
     logo_b64: str | None = None,
+    original_decisions: CreativeDecisions | None = None,
 ) -> str:
     """Replace placeholders and CSS variables in the HTML template."""
     # Build Google Fonts URL (both headline and subtext)
@@ -96,6 +97,28 @@ def _inject_into_template(
     else:
         html = f"<head>\n{font_links}\n{css_overrides}\n</head>\n{html}"
 
+    # Fix hardcoded colors: Opus sometimes writes inline hex colors instead of var(--color-xxx).
+    # When editing, the template HTML has the OLD colors hardcoded. Replace them with CSS variables
+    # so the new decisions' colors take effect.
+    import re
+    # Use original decisions (pre-edit) if available, otherwise use current decisions
+    src = original_decisions or decisions
+    _old_color_to_var = {
+        src.color_bg: "var(--color-bg)",
+        src.color_text: "var(--color-text)",
+        src.color_accent: "var(--color-accent)",
+        src.color_subtext: "var(--color-subtext)",
+    }
+    for hex_color, css_var in _old_color_to_var.items():
+        if hex_color and len(hex_color) >= 4:
+            # Replace in style contexts (after : or ; or space, before ; or " or ')
+            html = re.sub(
+                rf'(?<=[:;\s])({re.escape(hex_color)})(?=[;\s"\'])',
+                css_var,
+                html,
+                flags=re.IGNORECASE,
+            )
+
     return html
 
 
@@ -105,6 +128,7 @@ async def render(
     client_name: str,
     dynamic_html: str | None = None,
     logo_b64: str | None = None,
+    original_decisions: CreativeDecisions | None = None,
 ) -> RenderResult:
     """
     Render the final post as a 1080x1080 PNG.
@@ -127,7 +151,7 @@ async def render(
             template_html = template_path.read_text(encoding="utf-8")
 
     # Inject decisions
-    final_html = _inject_into_template(template_html, decisions, image, client_name, logo_b64)
+    final_html = _inject_into_template(template_html, decisions, image, client_name, logo_b64, original_decisions)
 
     # Generate output path
     output_dir = Path(config.OUTPUT_DIR)
