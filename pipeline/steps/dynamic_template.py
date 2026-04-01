@@ -57,6 +57,11 @@ CRITICAL RULES:
   For example, write: <h1>{{HEADLINE}}</h1>
   NEVER write: <h1>Clear thinking. Elevated results.</h1>
   The render engine will replace the placeholders with the actual text.
+- NEVER use hardcoded hex colors (like #2A2A2A or #F2EDE4) in your CSS.
+  ALWAYS use the CSS custom properties: var(--color-bg), var(--color-text), var(--color-accent), var(--color-subtext), var(--client-color).
+  For example: color: var(--color-text)  NOT  color: #2A2A2A
+  background: var(--color-bg)  NOT  background: #F5F0E8
+  This ensures colors can be changed dynamically without re-generating the template.
 
 Return ONLY the complete HTML file. No explanation, no markdown fences."""
 
@@ -167,6 +172,30 @@ Return the complete HTML file."""
                     "</body>",
                     '<span style="position:absolute;bottom:40px;right:48px;font-size:14px;color:var(--client-color);text-transform:uppercase;letter-spacing:0.1em;opacity:0.7;">{{CLIENT_NAME}}</span>\n</body>'
                 )
+
+        # Post-process: replace any hardcoded hex colors with CSS variables
+        # Opus often writes inline colors like `color: #2A2A2A` instead of `color: var(--color-text)`
+        import re
+        _color_to_var = {
+            decisions.color_bg: "var(--color-bg)",
+            decisions.color_text: "var(--color-text)",
+            decisions.color_accent: "var(--color-accent)",
+            decisions.color_subtext: "var(--color-subtext)",
+        }
+        hardcoded_count = 0
+        for hex_color, css_var in _color_to_var.items():
+            if not hex_color or len(hex_color) < 4:
+                continue
+            # Don't replace inside CSS variable definitions (--color-*: #xxx)
+            # Only replace in property values and inline styles
+            pattern = rf'(?<!--color-[a-z]+:\s*)(?<=[:;\s])({re.escape(hex_color)})(?=[;\s"\'\)])'
+            matches = re.findall(pattern, html, flags=re.IGNORECASE)
+            if matches:
+                hardcoded_count += len(matches)
+                html = re.sub(pattern, css_var, html, flags=re.IGNORECASE)
+
+        if hardcoded_count > 0:
+            logger.info(f"Replaced {hardcoded_count} hardcoded color values with CSS variables in template")
 
         logger.info(f"Dynamic template generated ({len(html)} chars)")
         return html

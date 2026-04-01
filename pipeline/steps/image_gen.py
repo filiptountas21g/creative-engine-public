@@ -55,29 +55,43 @@ async def generate_image(
     """
     taste = brain_ctx.taste_context
 
+    logger.info(f"Image generation starting: image_source={image_source}")
+
     if image_source == "ai":
+        logger.info("AI-only mode — skipping stock search")
         return await _generate_ai_image(concept, taste)
 
     # Try stock photos if APIs are available
-    has_stock = config.UNSPLASH_ACCESS_KEY or config.PEXELS_API_KEY
-    if has_stock:
+    has_unsplash = bool(config.UNSPLASH_ACCESS_KEY)
+    has_pexels = bool(config.PEXELS_API_KEY)
+    logger.info(f"Stock APIs available: Unsplash={has_unsplash}, Pexels={has_pexels}")
+
+    if has_unsplash or has_pexels:
         try:
             # Lower the bar for stock-only mode
-            stock_result = await _try_stock_photos(concept, taste, lenient=(image_source == "stock"))
+            is_stock_mode = image_source == "stock"
+            logger.info(f"Searching stock photos (lenient={is_stock_mode})...")
+            stock_result = await _try_stock_photos(concept, taste, lenient=is_stock_mode)
             if stock_result:
+                logger.info(f"✓ Stock photo accepted: {stock_result.model_used}")
                 return stock_result
-            if image_source == "stock":
-                logger.warning("Stock-only mode but no good photos found — trying broader search")
+            if is_stock_mode:
+                logger.warning("Stock-only mode — first search failed, trying broader search...")
                 stock_result = await _try_stock_photos_broad(concept, taste)
                 if stock_result:
+                    logger.info(f"✓ Broad stock search found: {stock_result.model_used}")
                     return stock_result
-                logger.warning("Still no stock photos — forced to use AI as last resort")
+                logger.warning("Stock-only mode — ALL stock attempts failed, forced to use AI")
             else:
-                logger.info("Stock photos not good enough — falling back to AI generation")
+                logger.info("Stock photos not good enough in auto mode — falling back to AI")
         except Exception as e:
-            logger.warning(f"Stock photo search failed: {e} — falling back to AI generation")
+            logger.warning(f"Stock photo search failed with exception: {e}")
+
+    elif image_source == "stock":
+        logger.error("User requested stock photos but NO stock API keys are configured!")
 
     # Fallback: AI generation
+    logger.info("Generating AI image...")
     return await _generate_ai_image(concept, taste)
 
 
@@ -96,20 +110,24 @@ async def _try_stock_photos(concept: CreativeConcept, taste: dict, lenient: bool
     candidates = []
     async with httpx.AsyncClient(timeout=30) as http:
         for query in queries[:2]:  # max 2 queries
+            logger.info(f"Searching stock photos for: '{query}'")
             if config.UNSPLASH_ACCESS_KEY:
                 unsplash_results = await _search_unsplash(http, query)
+                logger.info(f"  Unsplash returned {len(unsplash_results)} results for '{query}'")
                 candidates.extend(unsplash_results)
             if config.PEXELS_API_KEY:
                 pexels_results = await _search_pexels(http, query)
+                logger.info(f"  Pexels returned {len(pexels_results)} results for '{query}'")
                 candidates.extend(pexels_results)
 
+    logger.info(f"Total stock candidates found: {len(candidates)}")
     if not candidates:
-        logger.info("No stock photo results found")
+        logger.warning("No stock photo results from any source")
         return None
 
     # Step 3: Download top candidates for Vision judging
-    # Take top 4 (2 from each query if available)
-    top_candidates = candidates[:4]
+    # Take top 6 for better selection
+    top_candidates = candidates[:6]
 
     async with httpx.AsyncClient(timeout=30) as http:
         downloaded = []
@@ -239,12 +257,14 @@ async def _search_unsplash(http: httpx.AsyncClient, query: str) -> list[dict]:
             "https://api.unsplash.com/search/photos",
             params={
                 "query": query,
-                "per_page": 4,
+                "per_page": 8,
                 "orientation": "squarish",
             },
             headers={"Authorization": f"Client-ID {config.UNSPLASH_ACCESS_KEY}"},
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            logger.warning(f"Unsplash returned HTTP {resp.status_code}: {resp.text[:200]}")
+            return []
         data = resp.json()
 
         results = []
@@ -260,7 +280,7 @@ async def _search_unsplash(http: httpx.AsyncClient, query: str) -> list[dict]:
             })
         return results
     except Exception as e:
-        logger.warning(f"Unsplash search failed: {e}")
+        logger.warning(f"Unsplash search exception: {e}")
         return []
 
 
@@ -271,12 +291,14 @@ async def _search_pexels(http: httpx.AsyncClient, query: str) -> list[dict]:
             "https://api.pexels.com/v1/search",
             params={
                 "query": query,
-                "per_page": 4,
+                "per_page": 8,
                 "size": "medium",
             },
             headers={"Authorization": config.PEXELS_API_KEY},
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            logger.warning(f"Pexels returned HTTP {resp.status_code}: {resp.text[:200]}")
+            return []
         data = resp.json()
 
         results = []
@@ -292,7 +314,7 @@ async def _search_pexels(http: httpx.AsyncClient, query: str) -> list[dict]:
             })
         return results
     except Exception as e:
-        logger.warning(f"Pexels search failed: {e}")
+        logger.warning(f"Pexels search exception: {e}")
         return []
 
 
@@ -306,10 +328,12 @@ async def _judge_stock_photos(
     """Use Claude Vision to judge stock photos. Returns the best one or None."""
 
     strictness = (
-        "The user specifically asked for a stock photo, so be MORE ACCEPTING. "
-        "Pick the BEST available photo even if it's not a perfect match for the concept. "
-        "A good-looking, professional photo that captures the general mood is fine. "
-        "Only return -1 if ALL photos are truly terrible quality or completely irrelevant."
+        "IMPORTANT: The user specifically asked for STOCK PHOTOS. You MUST pick one. "
+        "Choose the BEST available photo. ANY decent professional photo is acceptable. "
+        "It does NOT need to match the concept exactly — general mood/vibe is enough. "
+        "Return -1 ONLY if every single photo is extremely low quality or completely wrong "
+        "(e.g. all photos are of food when concept is about technology). "
+        "When in doubt, PICK ONE. The user prefers a real photo over AI-generated."
     ) if lenient else (
         "Be SELECTIVE — only pick a photo if it genuinely matches the concept. "
         "If the results are generic or don't capture the specific idea, return -1 "
