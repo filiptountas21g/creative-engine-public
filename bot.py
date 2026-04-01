@@ -423,6 +423,43 @@ TOOLS = [
         },
     },
     {
+        "name": "save_client_rule",
+        "description": (
+            "Save a permanent design rule or preference for a specific client. "
+            "Use when the user says things like 'never use orange for Georgoulis', "
+            "'always use dark backgrounds for LMW', 'Georgoulis should always use serif fonts'. "
+            "These rules persist in the Brain and are applied to ALL future posts for that client."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "client": {"type": "string", "description": "Client name the rule applies to"},
+                "rule": {"type": "string", "description": "The design rule in clear language, e.g. 'never use orange or warm accent colors'"},
+                "avoid_colors": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Specific hex colors to avoid, e.g. ['#D97706', '#EA580C', '#F59E0B']",
+                },
+                "prefer_colors": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Preferred hex colors for this client",
+                },
+                "prefer_fonts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Preferred fonts for this client",
+                },
+                "avoid_fonts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Fonts to avoid for this client",
+                },
+            },
+            "required": ["client", "rule"],
+        },
+    },
+    {
         "name": "resend_last_post",
         "description": "Re-send the last generated post image. Use when user says 'send it', 'show me', etc.",
         "input_schema": {
@@ -479,6 +516,7 @@ Rules:
   Reference: Red=#DC2626, Orange=#EA580C, Amber=#D97706, Yellow=#EAB308, Lime=#65A30D, Green=#16A34A, Emerald=#059669, Teal=#0D9488, Cyan=#0891B2, Sky=#0284C7, Blue=#2563EB, Indigo=#4F46E5, Violet=#7C3AED, Purple=#9333EA, Fuchsia=#C026D3, Pink=#DB2777, Rose=#E11D48, White=#FFFFFF, Black=#000000, Gray=#6B7280, Beige=#F5F0E8, Navy=#1E3A5F, Burgundy=#800020, Gold=#FFD700, Coral=#FF6B6B, Turquoise=#40E0D0, Peach=#FFCBA4, Lavender=#E6E6FA, Mint=#98FB98, Cream=#FFFDD0, Charcoal=#36454F
 - STOCK PHOTOS: When user asks to "use stock photos", "use real photos", "no AI images", "use actual photos", or anything similar → set image_source="stock" on generate_post. This is CRITICAL. Default is "auto".
 - INSPIRATION POSTS: When user sends an image and says "make a post like this", "similar to this one", "based on this" → set use_last_inspiration=true on generate_post. This makes the template replicate the layout of THAT specific image. Do NOT set this for normal posts.
+- CLIENT RULES: When user says "never use X for client", "always use Y for client", "client should not have Z" → call save_client_rule to permanently store this. Do this IN ADDITION to any other action (like generating a new post). Example: "never use orange for Georgoulis" → save_client_rule + generate_post.
 {_get_memory_context(user_id)}"""
 
 
@@ -722,6 +760,8 @@ async def _execute_tool(tool_name: str, tool_input: dict, user_id: int, msg) -> 
         return await _exec_get_taste(user_id, msg)
     elif tool_name == "manage_templates":
         return await _exec_manage_templates(tool_input, msg)
+    elif tool_name == "save_client_rule":
+        return await _exec_save_client_rule(tool_input, user_id, msg)
     elif tool_name == "resend_last_post":
         return await _exec_resend(user_id, msg)
     else:
@@ -1199,6 +1239,28 @@ async def _exec_manage_templates(params: dict, msg) -> str:
             lines.append(f"  • {t.stem}")
         await msg.reply_text("\n".join(lines))
         return f"Showed {len(template_files)} templates."
+
+
+async def _exec_save_client_rule(params: dict, user_id: int, msg) -> str:
+    """Save a permanent design rule for a client to the Brain."""
+    client = params.get("client", "")
+    rule = params.get("rule", "")
+    if not client or not rule:
+        return "Need a client name and a rule."
+
+    preferences = {"rules": [rule]}
+    if params.get("avoid_colors"):
+        preferences["avoid_colors"] = params["avoid_colors"]
+    if params.get("prefer_colors"):
+        preferences["prefer_colors"] = params["prefer_colors"]
+    if params.get("prefer_fonts"):
+        preferences["prefer_fonts"] = params["prefer_fonts"]
+    if params.get("avoid_fonts"):
+        preferences["avoid_fonts"] = params["avoid_fonts"]
+
+    await save_client_preference(brain, client, preferences)
+    logger.info(f"[rule] Saved client rule for {client}: {rule}")
+    return f"Rule saved for {client}: {rule}. This will apply to all future posts."
 
 
 async def _exec_resend(user_id: int, msg) -> str:
