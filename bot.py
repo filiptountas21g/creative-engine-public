@@ -162,7 +162,8 @@ def _trim_history(user_id: int):
 
 def _get_history_for_api(user_id: int) -> list[dict]:
     """Get conversation history formatted for the Anthropic API.
-    Returns the messages list, ensuring it starts with 'user' role."""
+    Returns the messages list, ensuring it starts with 'user' role
+    and all tool_result blocks have matching tool_use blocks."""
     hist = _chat_history.get(user_id, [])
     if not hist:
         return []
@@ -172,7 +173,39 @@ def _get_history_for_api(user_id: int) -> list[dict]:
         if msg["role"] == "user":
             start = i
             break
-    return hist[start:]
+    result = hist[start:]
+
+    # Validate tool_use/tool_result pairing — collect all tool_use IDs,
+    # then strip any tool_result that references a missing tool_use
+    tool_use_ids = set()
+    for msg in result:
+        if msg["role"] == "assistant" and isinstance(msg.get("content"), list):
+            for block in msg["content"]:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_use_ids.add(block.get("id"))
+
+    # Filter out orphaned tool_results
+    cleaned = []
+    for msg in result:
+        if msg["role"] == "user" and isinstance(msg.get("content"), list):
+            filtered_blocks = []
+            for block in msg["content"]:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    if block.get("tool_use_id") not in tool_use_ids:
+                        logger.warning(f"Dropping orphaned tool_result for {block.get('tool_use_id')}")
+                        continue
+                filtered_blocks.append(block)
+            if filtered_blocks:
+                cleaned.append({"role": "user", "content": filtered_blocks})
+            # Skip empty messages (all blocks were orphaned)
+        else:
+            cleaned.append(msg)
+
+    # Final check: ensure alternating roles and starts with user
+    if cleaned and cleaned[0]["role"] != "user":
+        cleaned = cleaned[1:]
+
+    return cleaned
 
 
 # ── Tool Definitions ──────────────────────────────────────
