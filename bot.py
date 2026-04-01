@@ -63,11 +63,83 @@ _analysis_by_msg: dict[int, dict] = {}
 MAX_HISTORY = 20
 _chat_history: dict[int, list[dict]] = {}
 
-# Track last pipeline result per user for edits
+# Track last pipeline result per user for edits — persisted to disk
 _last_post_by_user: dict[int, dict] = {}
+_LAST_POST_FILE = Path(config.OUTPUT_DIR) / ".last_posts.json"
 
 # Track previous decisions per user for variety
 _previous_decisions: dict[int, list[dict]] = {}
+
+
+def _save_last_posts():
+    """Persist last post data to disk so it survives restarts."""
+    try:
+        # Serialize — skip non-JSON-serializable fields, keep what we need for resend
+        serializable = {}
+        for uid, data in _last_post_by_user.items():
+            d = data.get("decisions")
+            serializable[str(uid)] = {
+                "client": data.get("client", ""),
+                "rendered_path": data.get("rendered_path", ""),
+                "template_html": data.get("template_html", ""),
+                "logo_b64": data.get("logo_b64"),
+                "decisions": {
+                    "headline": d.headline, "subtext": d.subtext, "cta": d.cta,
+                    "template": d.template,
+                    "font_headline": d.font_headline, "font_headline_weight": d.font_headline_weight,
+                    "font_headline_size": d.font_headline_size,
+                    "font_subtext": d.font_subtext, "font_subtext_weight": d.font_subtext_weight,
+                    "color_bg": d.color_bg, "color_text": d.color_text,
+                    "color_accent": d.color_accent, "color_subtext": d.color_subtext,
+                } if d else None,
+                "image_path": data.get("image", {}).image_path if data.get("image") else None,
+                "image_url": data.get("image", {}).image_url if data.get("image") else None,
+            }
+        _LAST_POST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _LAST_POST_FILE.write_text(json.dumps(serializable, ensure_ascii=False, indent=2))
+    except Exception as e:
+        logger.warning(f"Failed to save last posts: {e}")
+
+
+def _load_last_posts():
+    """Restore last post data from disk after restart."""
+    global _last_post_by_user
+    try:
+        if _LAST_POST_FILE.exists():
+            data = json.loads(_LAST_POST_FILE.read_text())
+            for uid_str, post_data in data.items():
+                uid = int(uid_str)
+                d = post_data.get("decisions")
+                if d:
+                    decisions = CreativeDecisions(
+                        headline=d.get("headline", ""), subtext=d.get("subtext", ""),
+                        cta=d.get("cta", ""), template=d.get("template", ""),
+                        font_headline=d.get("font_headline", "Inter"),
+                        font_headline_weight=d.get("font_headline_weight", "800"),
+                        font_headline_size=d.get("font_headline_size", 68),
+                        font_subtext=d.get("font_subtext", "DM Sans"),
+                        font_subtext_weight=d.get("font_subtext_weight", "400"),
+                        color_bg=d.get("color_bg", "#F5F4F0"),
+                        color_text=d.get("color_text", "#2A2A2A"),
+                        color_accent=d.get("color_accent", "#C4A77D"),
+                        color_subtext=d.get("color_subtext", "#6B6B6B"),
+                    )
+                    image = ImageResult(
+                        image_path=post_data.get("image_path", ""),
+                        image_url=post_data.get("image_url", ""),
+                        model_used="restored", prompt_used="",
+                    ) if post_data.get("image_path") else None
+                    _last_post_by_user[uid] = {
+                        "decisions": decisions,
+                        "image": image,
+                        "client": post_data.get("client", ""),
+                        "template_html": post_data.get("template_html", ""),
+                        "logo_b64": post_data.get("logo_b64"),
+                        "rendered_path": post_data.get("rendered_path", ""),
+                    }
+            logger.info(f"Restored last posts for {len(_last_post_by_user)} users from disk")
+    except Exception as e:
+        logger.warning(f"Failed to load last posts: {e}")
 
 
 def _add_to_history(user_id: int, role: str, content):
@@ -624,6 +696,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
                 "logo_b64": result.logo_b64,
                 "rendered_path": result.image_path,
             }
+            _save_last_posts()
             if user_id not in _previous_decisions:
                 _previous_decisions[user_id] = []
             _previous_decisions[user_id].append({
@@ -722,6 +795,7 @@ async def _exec_generate_carousel(params: dict, user_id: int, msg) -> str:
                 "logo_b64": getattr(last, 'logo_b64', None),
                 "rendered_path": last.image_path,
             }
+            _save_last_posts()
 
     return f"Carousel of {len(successful)} posts generated for {client_name}. Images sent."
 
@@ -804,6 +878,7 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             "logo_b64": logo_b64,
             "rendered_path": render_result.final_image_path,
         }
+        _save_last_posts()
 
         return f"Post edited. Changes: {changes_text}"
 
@@ -859,6 +934,7 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
             "logo_b64": logo_b64,
             "rendered_path": render_result.final_image_path,
         }
+        _save_last_posts()
 
         return f"Image replaced ({new_image.model_used}). Same layout."
 
@@ -1163,6 +1239,9 @@ def main():
         logger.info(f"Restored {restored} templates from Big Brain")
     else:
         logger.info("No templates in Brain yet — say 'rebuild templates' to generate them")
+
+    # Restore last post data from disk (survive container restarts)
+    _load_last_posts()
 
     logger.info("Bot ready. Polling for Telegram updates...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
