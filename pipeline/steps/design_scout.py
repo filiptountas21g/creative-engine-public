@@ -462,7 +462,8 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
                 f"{exclude_hint}\n"
                 f"{focus_text}\n\n"
                 f"What 3 image searches would find social media post designs matching this aesthetic? "
-                f"Prioritize 2024-2026 work."
+                f"Prioritize 2024-2026 work. "
+                f"Do NOT use quoted phrases — they kill results. Use plain keywords only."
             ),
         }],
     )
@@ -719,13 +720,16 @@ Return ONLY the JSON array."""
                         "domain": img.get("domain", ""),
                     })
     except (json.JSONDecodeError, Exception) as e:
-        logger.warning(f"Claude curation parse failed: {e}, using top images directly")
-        # Fallback: just take top 15 images
+        logger.warning(f"Claude curation parse failed: {e}, using raw images directly")
+
+    # If curation returned nothing (Claude rejected all or parse error), show raw results
+    if not items:
+        logger.warning(f"Curation returned 0 items — falling back to top {min(15, len(all_images))} raw images")
         for i, img in enumerate(all_images[:15]):
             items.append({
                 "index": i + 1,
                 "name": img.get("title", "Design")[:40],
-                "description": f"Design from {img.get('domain', '?')}",
+                "description": f"From {img.get('domain', '?')}",
                 "why_relevant": "",
                 "url": img.get("link", ""),
                 "image_url": img.get("imageUrl", ""),
@@ -733,7 +737,7 @@ Return ONLY the JSON array."""
                 "domain": img.get("domain", ""),
             })
 
-    logger.info(f"Scout search found {len(items)} curated items from Serper")
+    logger.info(f"Scout search found {len(items)} items from Serper")
 
     return {
         "items": items,
