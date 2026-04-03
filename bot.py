@@ -69,6 +69,9 @@ _last_post_by_user: dict[int, dict] = {}
 # Track previous decisions per user for variety
 _previous_decisions: dict[int, list[dict]] = {}
 
+# Pending scout results awaiting user approval
+_pending_scout: dict[int, dict] = {}
+
 # ── Sliding conversation memory ─────────────────────────
 # Keeps recent posts and analyses available for ~15 messages, auto-prunes
 MEMORY_TTL_MESSAGES = 15
@@ -468,6 +471,89 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "scout_designs",
+        "description": (
+            "Search the internet for fresh design inspiration using Perplexity. "
+            "Returns a PREVIEW list of design references — does NOT save anything yet. "
+            "The user must approve which ones to save (using approve_scout). "
+            "Use when user says 'find me fresh designs', 'search for new layouts', "
+            "'I'm bored of the layouts', 'bring me something new', 'find inspiration'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "client": {
+                    "type": "string",
+                    "description": "Client name — searches for industry-specific designs. Use 'ALL' for general.",
+                },
+                "focus": {
+                    "type": "string",
+                    "description": "Specific focus for the search — e.g. 'minimalist healthcare', 'bold typography', 'editorial layouts with serif fonts'. Captures what the user specifically wants to find.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "approve_scout",
+        "description": (
+            "Approve specific design references from the scout results and save them to Brain. "
+            "Use AFTER scout_designs has shown the preview list. "
+            "User says which ones to keep: '1, 3, 5' or 'all' or 'none'. "
+            "Only approved designs get processed and stored."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "selected": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "List of item numbers to approve (1-based). E.g. [1, 3, 5]",
+                },
+                "all": {
+                    "type": "boolean",
+                    "description": "Set to true if user wants all items approved",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "generate_from_scout",
+        "description": (
+            "Generate a post using a specific scout design reference as the layout blueprint. "
+            "Use when user says 'make a post like number 3', 'use that layout for LMW', "
+            "'make one like 2 for Somamed'. Requires pending scout results from scout_designs. "
+            "This both saves that specific layout AND generates a post following it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "scout_item": {
+                    "type": "integer",
+                    "description": "The scout item number to use as layout (1-based)",
+                },
+                "client": {
+                    "type": "string",
+                    "description": "Client name for the post",
+                },
+                "brief": {
+                    "type": "string",
+                    "description": "Creative direction / topic for the post",
+                },
+                "platform": {
+                    "type": "string",
+                    "enum": ["linkedin", "instagram", "facebook"],
+                },
+                "image_source": {
+                    "type": "string",
+                    "enum": ["auto", "stock", "ai"],
+                },
+            },
+            "required": ["scout_item", "client", "brief"],
+        },
+    },
 ]
 
 
@@ -494,6 +580,19 @@ def _build_system_prompt(user_id: int) -> str:
             f"  Has logo: {'yes' if post_data.get('logo_b64') else 'no'}\n"
         )
 
+    has_pending_scout = user_id in _pending_scout
+    scout_context = ""
+    if has_pending_scout:
+        pending = _pending_scout[user_id]
+        items = pending.get("items", [])
+        item_nums = ", ".join(str(i["index"]) for i in items)
+        scout_context = (
+            f"\n⚠️ PENDING SCOUT: User has {len(items)} design references waiting for approval (items: {item_nums}). "
+            f"If the user replies with numbers, 'all', or 'none', call approve_scout. "
+            f"Numbers like '1, 3, 5' → approve_scout with selected=[1,3,5]. "
+            f"'all' → approve_scout with all=true. 'none' or 'skip' → approve_scout with selected=[]."
+        )
+
     return f"""You are John, a creative design assistant for Lectus Creative Engine.
 You help Filip create social media posts, learn his design taste, and manage templates.
 You speak naturally in whatever language the user speaks (Greek or English).
@@ -517,6 +616,9 @@ Rules:
 - STOCK PHOTOS: When user asks to "use stock photos", "use real photos", "no AI images", "use actual photos", or anything similar → set image_source="stock" on generate_post. This is CRITICAL. Default is "auto".
 - INSPIRATION POSTS: When user sends an image and says "make a post like this", "similar to this one", "based on this" → set use_last_inspiration=true on generate_post. This makes the template replicate the layout of THAT specific image. Do NOT set this for normal posts.
 - CLIENT RULES: When user says "never use X for client", "always use Y for client", "client should not have Z" → call save_client_rule to permanently store this. Do this IN ADDITION to any other action (like generating a new post). Example: "never use orange for Georgoulis" → save_client_rule + generate_post.
+- DESIGN SCOUT: When user asks to find fresh designs, call scout_designs. It shows a preview — user must approve before anything is saved. If there are pending scout results, watch for the user's approval reply.
+- GENERATE FROM SCOUT: When user says "make a post like number 3" or "use layout 2 for LMW" while scout results are pending, call generate_from_scout with the item number, client and brief. This generates a post using that specific layout as a blueprint.
+{scout_context}
 {_get_memory_context(user_id)}"""
 
 
@@ -770,6 +872,12 @@ async def _execute_tool(tool_name: str, tool_input: dict, user_id: int, msg) -> 
         return await _exec_save_client_rule(tool_input, user_id, msg)
     elif tool_name == "resend_last_post":
         return await _exec_resend(user_id, msg)
+    elif tool_name == "scout_designs":
+        return await _exec_scout_designs(tool_input, user_id, msg)
+    elif tool_name == "approve_scout":
+        return await _exec_approve_scout(tool_input, user_id, msg)
+    elif tool_name == "generate_from_scout":
+        return await _exec_generate_from_scout(tool_input, user_id, msg)
     else:
         return f"Unknown tool: {tool_name}"
 
@@ -1158,16 +1266,24 @@ async def _exec_save_favorite(params: dict, user_id: int, msg) -> str:
     modifications = params.get("modifications")
     client_name = params.get("client") or last.get("client", "ALL")
     concept_summary = decisions.headline if hasattr(decisions, "headline") else ""
+    template_html = last.get("template_html", "")
 
     try:
         await save_liked_template(
             brain=brain,
             decisions=decisions,
-            template_html="",
+            template_html=template_html,
             concept_summary=concept_summary,
             client=client_name,
             modifications=modifications,
         )
+
+        # Also save the actual HTML to Google Drive for reuse
+        from pipeline.steps.dynamic_template import save_template_to_drive
+        if template_html:
+            drive_id = await save_template_to_drive(client_name, template_html, decisions)
+            if drive_id:
+                logger.info(f"Template HTML saved to Drive for {client_name}")
 
         if modifications and client_name != "ALL":
             await save_client_preference(brain, client_name, modifications)
@@ -1287,6 +1403,361 @@ async def _exec_resend(user_id: int, msg) -> str:
     else:
         await msg.reply_text("⚠️ The file is no longer available. Try generating a new one.")
         return "File not available."
+
+
+async def _exec_scout_designs(params: dict, user_id: int, msg) -> str:
+    """Phase 1: Search for fresh design inspiration — show preview, wait for approval."""
+    from pipeline.steps.design_scout import scout_search, detect_staleness
+
+    client_name = params.get("client", "ALL")
+    focus = params.get("focus", "")
+    focus_text = f" ({focus})" if focus else ""
+    status_msg = await msg.reply_text(f"🔍 Searching for design inspiration{f' for {client_name}' if client_name != 'ALL' else ''}{focus_text}...")
+
+    try:
+        staleness = detect_staleness(brain, client=client_name)
+
+        await status_msg.edit_text("🔍 Building targeted search queries...")
+        result = await scout_search(brain, client=client_name, staleness=staleness, user_focus=focus)
+
+        items = result.get("items", [])
+        citations = result.get("citations", [])
+
+        if not items:
+            await status_msg.edit_text("❌ Couldn't find design references. Try again later.")
+            return "Scout search found nothing."
+
+        # Store pending results for approval
+        _pending_scout[user_id] = result
+
+        await status_msg.delete()
+
+        # Show staleness notice if needed
+        if staleness.get("is_stale"):
+            patterns = staleness.get("repeated_patterns", {})
+            stale_desc = ", ".join(f"{v}" for v in patterns.values())
+            await msg.reply_text(f"⚠️ Detected repetition in recent posts: {stale_desc}")
+
+        await msg.reply_text(f"🔍 Found {len(items)} designs — downloading images...")
+
+        # Download all images in parallel
+        import httpx as _httpx
+        import asyncio as _asyncio
+        import io
+
+        async def _fetch_image(item: dict) -> tuple[dict, bytes | None]:
+            domain = item.get("domain", "")
+
+            # Domain-specific Referer headers to bypass hotlink protection
+            referer_map = {
+                "pinterest.com": "https://www.pinterest.com/",
+                "behance.net": "https://www.behance.net/",
+                "dribbble.com": "https://dribbble.com/",
+                "instagram.com": "https://www.instagram.com/",
+            }
+            referer = next((v for k, v in referer_map.items() if k in domain), "https://www.google.com/")
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": referer,
+                "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+            }
+
+            # Try direct imageUrl first, then Google's cached thumbnail as fallback
+            urls_to_try = [u for u in [item.get("image_url", ""), item.get("thumbnail_url", "")] if u]
+            for url in urls_to_try:
+                try:
+                    async with _httpx.AsyncClient(timeout=20, follow_redirects=True) as hc:
+                        resp = await hc.get(url, headers=headers)
+                    if resp.status_code == 200 and len(resp.content) > 3000:
+                        return item, resp.content
+                except Exception as e:
+                    logger.warning(f"Image fetch failed ({url[:60]}): {e}")
+            return item, None
+
+        # Fetch all in parallel
+        fetch_tasks = [_fetch_image(item) for item in items]
+        fetched = await _asyncio.gather(*fetch_tasks)
+
+        # Send as media groups (max 10 per group) — much faster than individual sends
+        from telegram import InputMediaPhoto
+        group = []
+        sent_count = 0
+
+        async def _flush_group(grp: list):
+            if not grp:
+                return
+            try:
+                await msg.reply_media_group(media=grp)
+            except Exception as e:
+                logger.warning(f"Media group send failed: {e}")
+                # Fallback: send individually
+                for med in grp:
+                    try:
+                        await msg.reply_photo(photo=med.media, caption=med.caption, parse_mode="HTML")
+                    except Exception:
+                        pass
+
+        for item, img_bytes in fetched:
+            idx = item["index"]
+            name = item.get("name", "Design")
+            description = item.get("description", "")[:180]
+            domain = item.get("domain", "")
+            page_url = item.get("url", "")
+
+            caption = f"<b>{idx}. {name}</b>\n{description}\n📍 {domain}"
+            if page_url:
+                caption += f"\n🔗 {page_url}"
+            caption = caption[:1024]
+
+            if img_bytes:
+                group.append(InputMediaPhoto(
+                    media=io.BytesIO(img_bytes),
+                    caption=caption,
+                    parse_mode="HTML",
+                ))
+                sent_count += 1
+            else:
+                # Flush current group before sending text-only item
+                await _flush_group(group)
+                group = []
+                try:
+                    await msg.reply_text(caption, parse_mode="HTML")
+                except Exception:
+                    await msg.reply_text(f"{idx}. {name}\n{description}")
+                sent_count += 1
+
+            # Flush group when it hits 10
+            if len(group) == 10:
+                await _flush_group(group)
+                group = []
+
+        # Flush any remaining
+        await _flush_group(group)
+
+        # Final instruction
+        await msg.reply_text(
+            f"💬 Sent {sent_count} designs. Which ones should I save to Brain?\n"
+            "Reply with numbers (e.g. <b>1, 3, 5</b>), <b>all</b>, or <b>none</b>.\n"
+            "💡 Or say <b>'make a post for [client] like 3'</b> to use one directly!\n"
+            "The ones you save teach the system what you like — react to as many as you can.",
+            parse_mode="HTML",
+        )
+
+        return (
+            f"Scout found {len(items)} design references. Preview shown to user with links. "
+            f"WAITING for user to respond. They can: "
+            f"(1) Reply with numbers to save (e.g. '1, 3, 5') → call approve_scout with selected=[1,3,5]. "
+            f"(2) Say 'all' → approve_scout with all=true. "
+            f"(3) Say 'none' → approve_scout with selected=[]. "
+            f"(4) Say 'make a post for [client] like 3' → call generate_post with scout_layout_index=3. "
+            f"Items available: {', '.join(str(i['index']) for i in items)}"
+        )
+
+    except Exception as e:
+        logger.error(f"Design scout failed: {e}", exc_info=True)
+        try:
+            await status_msg.edit_text(f"❌ Scout failed: {str(e)[:200]}")
+        except Exception:
+            pass
+        return f"Scout failed: {str(e)[:100]}"
+
+
+async def _exec_approve_scout(params: dict, user_id: int, msg) -> str:
+    """Phase 2: User approved specific scout items — process and store them."""
+    from pipeline.steps.design_scout import scout_approve
+
+    pending = _pending_scout.get(user_id)
+    if not pending:
+        return "No pending scout results. Run scout_designs first."
+
+    items = pending.get("items", [])
+    approve_all = params.get("all", False)
+
+    if approve_all:
+        selected = [item["index"] for item in items]
+    else:
+        selected = params.get("selected", [])
+
+    if not selected:
+        # Clear pending
+        _pending_scout.pop(user_id, None)
+        await msg.reply_text("👍 No designs saved. Scout results cleared.")
+        return "User declined all scout results."
+
+    status_msg = await msg.reply_text(f"⏳ Processing {len(selected)} approved designs...")
+
+    try:
+        result = await scout_approve(brain, pending, selected)
+
+        _pending_scout.pop(user_id, None)  # Clear pending
+
+        if not result.get("stored"):
+            await status_msg.edit_text("❌ Failed to process designs.")
+            return "Scout approval failed."
+
+        await status_msg.delete()
+
+        # Show stored layouts
+        layouts_text = result.get("layouts_text", "")
+        header = f"✅ Saved {result.get('layouts_found', 0)} layout blueprints to Brain!\nOpus will use these for fresh designs.\n"
+
+        await msg.reply_text(header)
+
+        if layouts_text:
+            chunks = [layouts_text[i:i + 4000] for i in range(0, len(layouts_text), 4000)]
+            for chunk in chunks[:3]:
+                try:
+                    await msg.reply_text(chunk)
+                except Exception:
+                    pass
+
+        return f"Approved and stored {result.get('layouts_found', 0)} layouts in Brain."
+
+    except Exception as e:
+        logger.error(f"Scout approval failed: {e}", exc_info=True)
+        try:
+            await status_msg.edit_text(f"❌ Processing failed: {str(e)[:200]}")
+        except Exception:
+            pass
+        return f"Approval failed: {str(e)[:100]}"
+
+
+async def _exec_generate_from_scout(params: dict, user_id: int, msg) -> str:
+    """Generate a post using a specific scout item as the forced layout reference.
+    Downloads the actual design image → Vision analyzes it → Opus replicates the layout."""
+    from pipeline.steps.design_scout import extract_single_reference, scout_approve
+
+    pending = _pending_scout.get(user_id)
+    if not pending:
+        return "No pending scout results. Run scout_designs first."
+
+    item_index = params.get("scout_item", 1)
+    client_name = params.get("client", "ALL")
+    brief = params.get("brief", "creative post")
+    platform = params.get("platform", "linkedin")
+    image_source = params.get("image_source", "auto")
+
+    # Find the item name for display
+    item_name = "design"
+    for item in pending.get("items", []):
+        if item["index"] == item_index:
+            item_name = item.get("name", "design")
+            break
+
+    status_msg = await msg.reply_text(
+        f"🎨 Generating post for {client_name} using scout layout #{item_index} ({item_name})...\n\n"
+        f"⏳ Downloading design image + analyzing layout..."
+    )
+
+    try:
+        # Step 1: Download image + run full Vision analysis (same as inspiration photos)
+        reference = await extract_single_reference(pending, item_index)
+        if not reference:
+            await status_msg.edit_text(f"❌ Couldn't extract reference for item #{item_index}")
+            return f"Failed to extract reference for scout item {item_index}."
+
+        has_image = "_image_b64" in reference
+        if has_image:
+            await status_msg.edit_text(
+                f"🎨 Downloaded + analyzed the design ✓\n"
+                f"Building post with {item_name} layout for {client_name}..."
+            )
+        else:
+            await status_msg.edit_text(
+                f"⚠️ Couldn't download image — using text reference\n"
+                f"Building post with {item_name} layout for {client_name}..."
+            )
+
+        # Step 2: Also save this item to Brain (user chose it = implicit approval)
+        try:
+            await scout_approve(brain, pending, [item_index])
+        except Exception as e:
+            logger.warning(f"Scout auto-approve on generate failed (non-critical): {e}")
+
+        async def on_progress(step: str, progress_msg: str):
+            try:
+                emojis = {
+                    "research": "🔍", "brain": "🧠", "concept": "💡",
+                    "copy": "📝", "image": "📸", "decisions": "🎯",
+                    "template": "📐", "render": "🖨️", "critique": "👁️",
+                    "fix": "🔧", "brain_write": "💾", "scout": "🔍",
+                }
+                emoji = emojis.get(step, "⏳")
+                await status_msg.edit_text(
+                    f"🎨 {item_name} layout for {client_name}...\n\n{emoji} {progress_msg}",
+                )
+            except Exception:
+                pass
+
+        pipeline_input = PipelineInput(client=client_name, brief=brief, platform=platform)
+        prev = _previous_decisions.get(user_id)
+
+        result = await run_pipeline(
+            pipeline_input, brain, on_progress=on_progress,
+            previous_decisions=prev, image_source=image_source,
+            forced_reference=reference,
+        )
+
+        result_text = format_result_for_telegram(result, pipeline_input)
+
+        if result.success and result.image_path:
+            try:
+                img_path = Path(result.image_path)
+                send_path = img_path
+                if img_path.stat().st_size > 5 * 1024 * 1024:
+                    from PIL import Image as PILImage
+                    with PILImage.open(img_path) as pil_img:
+                        compressed = img_path.with_suffix(".jpg")
+                        pil_img.convert("RGB").save(compressed, "JPEG", quality=85)
+                        send_path = compressed
+
+                caption = f"🎨 Layout: {item_name}\n{result_text[:900]}"
+                await msg.reply_photo(
+                    photo=open(send_path, "rb"),
+                    caption=caption[:1024],
+                    parse_mode="HTML",
+                    read_timeout=60, write_timeout=60, connect_timeout=30,
+                )
+            except Exception as e:
+                logger.error(f"Failed to send image: {e}")
+                await msg.reply_text(result_text, parse_mode="HTML")
+
+            if result.decisions and result.hero_image:
+                post_data = {
+                    "decisions": result.decisions,
+                    "image": result.hero_image,
+                    "concept": result.concept,
+                    "client": client_name,
+                    "template_html": result.template_html,
+                    "logo_b64": result.logo_b64,
+                    "rendered_path": result.image_path,
+                    "extra_images": result.extra_images,
+                }
+                _last_post_by_user[user_id] = post_data
+                _remember(user_id, "post", post_data, label=f"{client_name}: {result.decisions.headline[:40]}")
+
+                if user_id not in _previous_decisions:
+                    _previous_decisions[user_id] = []
+                _previous_decisions[user_id].append({
+                    "template": result.decisions.template,
+                    "font": result.decisions.font_headline,
+                    "color_bg": result.decisions.color_bg,
+                    "color_text": result.decisions.color_text,
+                    "color_accent": result.decisions.color_accent,
+                })
+
+            return f"Post generated for {client_name} using scout layout '{item_name}'. Image sent."
+        else:
+            await status_msg.edit_text(result_text)
+            return f"Post generation failed: {result.error}"
+
+    except Exception as e:
+        logger.error(f"Generate from scout failed: {e}", exc_info=True)
+        try:
+            await status_msg.edit_text(f"❌ Generation failed: {str(e)[:200]}")
+        except Exception:
+            pass
+        return f"Generation failed: {str(e)[:100]}"
 
 
 # ── Tool-Use Loop (shared by text_handler and photo_handler) ──

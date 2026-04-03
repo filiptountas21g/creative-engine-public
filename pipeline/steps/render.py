@@ -112,7 +112,10 @@ def _inject_into_template(
       }}
 
       /* Force overrides — ensures edits always take effect over hardcoded values */
-      body {{
+      body, body > div, body > section, body > main, body > article,
+      [class*="container" i], [class*="wrapper" i], [class*="card" i],
+      [class*="background" i], [class*="canvas" i], [class*="post" i],
+      [class*="slide" i], [class*="layout" i], [class*="main" i] {{
         background-color: var(--color-bg) !important;
       }}
       [class*="headline" i], [class*="title" i], [class*="heading" i], h1, h2 {{
@@ -164,20 +167,23 @@ def _inject_into_template(
         src.color_accent: "var(--color-accent)",
         src.color_subtext: "var(--color-subtext)",
     }
+
+    # Split HTML into the :root/CSS-variable block vs everything else
+    # We only skip replacements inside CSS variable DEFINITIONS (--color-xxx: #hex)
     for hex_color, css_var in _old_color_to_var.items():
-        if hex_color and len(hex_color) >= 4:
-            def _replace_color(match, _css_var=css_var, _html=html):
-                start = max(0, match.start() - 30)
-                prefix = _html[start:match.start()]
-                if re.search(r'--[\w-]+\s*:\s*$', prefix):
-                    return match.group(0)
-                return _css_var
-            html = re.sub(
-                re.escape(hex_color),
-                _replace_color,
-                html,
-                flags=re.IGNORECASE,
-            )
+        if not hex_color or len(hex_color) < 4:
+            continue
+        # Replace all occurrences EXCEPT inside CSS variable definitions
+        # Pattern: skip lines that look like "--some-var: #hex"
+        lines = html.split("\n")
+        new_lines = []
+        for line in lines:
+            if re.match(r'\s*--[\w-]+\s*:', line):
+                # This is a CSS variable definition line — don't touch it
+                new_lines.append(line)
+            else:
+                new_lines.append(re.sub(re.escape(hex_color), css_var, line, flags=re.IGNORECASE))
+        html = "\n".join(new_lines)
 
     # Fix hardcoded fonts: replace old font names with CSS variables
     if original_decisions:

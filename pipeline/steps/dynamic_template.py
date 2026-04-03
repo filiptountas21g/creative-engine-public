@@ -3,11 +3,13 @@
 import json
 import logging
 import random
+import time
 
 import anthropic
 
 import config
 from brain.client import Brain
+from brain.drive_client import ensure_subfolder, upload_html, list_html_files, download_text
 from pipeline.types import CreativeDecisions
 
 logger = logging.getLogger(__name__)
@@ -75,12 +77,20 @@ CRITICAL RULES:
 Return ONLY the complete HTML file. No explanation, no markdown fences."""
 
 
+def _logo_instruction(has_logo: bool) -> str:
+    if has_logo:
+        return 'Include a small logo (40-60px) in a tasteful position using: <img src="{{LOGO_PATH}}" ...>. The client has a logo on file.'
+    return "No client logo available — use {{CLIENT_NAME}} text label instead."
+
+
 async def generate_dynamic_template(
     decisions: CreativeDecisions,
     brain: Brain,
     previous_templates: list[str] | None = None,
     has_logo: bool = False,
     forced_reference: dict | None = None,
+    client: str = "ALL",
+    anti_repetition: str | None = None,
 ) -> str:
     """
     Generate a fresh HTML template based on an inspiration reference.
@@ -95,6 +105,12 @@ async def generate_dynamic_template(
         reference_text = _format_reference(forced_reference)
         logger.info("Using forced inspiration reference from user's latest image")
     else:
+        # Try loading a saved template from Drive — adapt it instead of generating from scratch
+        drive_templates = await _try_load_drive_template(client)
+        if drive_templates:
+            logger.info("Using saved Drive template as base — Opus will adapt it")
+            return await _adapt_saved_template(drive_templates, decisions, has_logo)
+
         # Get all inspiration references
         refs = brain.query(topic="taste_reference", limit=50)
 
@@ -155,8 +171,9 @@ The template style hint is just a suggestion — you can interpret it freely.
 For example, "split" doesn't have to be a strict 50/50 split — it could be 30/70, or angled, or overlapping.
 {avoid_text}
 
-{"Include a small logo (40-60px) in a tasteful position using: <img src=\"{{LOGO_PATH}}\" ...>. The client has a logo on file." if has_logo else "No client logo available — use {{CLIENT_NAME}} text label instead."}
+{_logo_instruction(has_logo)}
 {uniqueness_instruction}
+{anti_repetition or ""}
 
 Return the complete HTML file."""
 
@@ -562,6 +579,57 @@ async def save_liked_template(
     logger.info(f"Saved liked template for {client}: {liked_data['template_style']} + {liked_data['font_headline']}")
 
 
+async def save_template_to_drive(client: str, template_html: str, decisions: CreativeDecisions) -> str | None:
+    """Save a liked template's HTML to Google Drive under the client's subfolder.
+    Returns the Drive file ID or None if Drive is not configured."""
+    if not config.DRIVE_TEMPLATES_FOLDER_ID:
+        logger.info("No DRIVE_TEMPLATES_FOLDER_ID — skipping Drive save")
+        return None
+
+    try:
+        # Ensure client subfolder exists
+        client_folder_id = await ensure_subfolder(config.DRIVE_TEMPLATES_FOLDER_ID, client)
+
+        # Generate filename with timestamp and style hint
+        ts = int(time.time())
+        filename = f"{decisions.template}_{decisions.font_headline}_{ts}.html"
+
+        file_id = await upload_html(client_folder_id, filename, template_html)
+        logger.info(f"Saved template HTML to Drive: {client}/{filename} (id={file_id})")
+        return file_id
+
+    except Exception as e:
+        logger.error(f"Failed to save template to Drive: {e}")
+        return None
+
+
+async def load_templates_from_drive(client: str, limit: int = 5) -> list[str]:
+    """Load saved template HTML files from Drive for a client.
+    Returns a list of HTML strings (most recent first)."""
+    if not config.DRIVE_TEMPLATES_FOLDER_ID:
+        return []
+
+    try:
+        # Find client subfolder
+        client_folder_id = await ensure_subfolder(config.DRIVE_TEMPLATES_FOLDER_ID, client)
+        files = await list_html_files(client_folder_id)
+
+        templates = []
+        for f in files[:limit]:
+            try:
+                html = await download_text(f["id"])
+                templates.append(html)
+                logger.info(f"Loaded template from Drive: {client}/{f['name']}")
+            except Exception as e:
+                logger.warning(f"Failed to download template {f['name']}: {e}")
+
+        return templates
+
+    except Exception as e:
+        logger.error(f"Failed to load templates from Drive: {e}")
+        return []
+
+
 async def save_client_preference(
     brain: Brain,
     client: str,
@@ -622,3 +690,82 @@ def get_client_preferences(brain: Brain, client: str) -> dict:
         merged["liked_templates"] = liked_templates
 
     return merged
+
+
+# ── Drive template helpers ───────────────────────────────────
+
+async def _try_load_drive_template(client: str) -> str | None:
+    """Try to load a saved template from Drive for this client.
+    Returns the HTML string or None if no saved templates exist.
+    Uses a 30% chance to encourage variety (70% generates fresh)."""
+    if not config.DRIVE_TEMPLATES_FOLDER_ID:
+        return None
+
+    # Only use saved templates 30% of the time for variety
+    if random.random() > 0.3:
+        return None
+
+    try:
+        templates = await load_templates_from_drive(client, limit=5)
+        if templates:
+            chosen = random.choice(templates)
+            logger.info(f"Picked saved Drive template for {client} ({len(chosen)} chars)")
+            return chosen
+    except Exception as e:
+        logger.warning(f"Drive template load failed: {e}")
+
+    return None
+
+
+async def _adapt_saved_template(
+    saved_html: str,
+    decisions: CreativeDecisions,
+    has_logo: bool = False,
+) -> str:
+    """Adapt a saved template to new content — Opus modifies the existing HTML
+    instead of generating from scratch. Much cheaper in tokens."""
+
+    adapt_prompt = f"""You have a saved HTML template that the user previously approved.
+Adapt it for NEW content while keeping the same layout structure.
+
+CHANGES TO MAKE:
+- Headline: {decisions.headline}
+- Subtext: {decisions.subtext}
+- CTA: {decisions.cta}
+- Font: {decisions.font_headline} ({decisions.font_headline_weight})
+- Colors: bg={decisions.color_bg}, text={decisions.color_text}, accent={decisions.color_accent}
+- {_logo_instruction(has_logo)}
+
+RULES:
+- Keep the EXACT same layout structure (grid, positioning, spacing)
+- Only change text content, colors, and fonts
+- Keep all {{IMAGE_1}}, {{IMAGE_2}} etc. placeholders
+- Keep {{HEADLINE}}, {{SUBTEXT}}, {{CTA}}, {{CLIENT_NAME}} placeholders
+- Use CSS variables (var(--color-bg), var(--font-headline), etc.) not hardcoded values
+- Return ONLY the complete HTML file
+
+SAVED TEMPLATE:
+{saved_html}"""
+
+    try:
+        response = _client.messages.create(
+            model=config.OPUS_MODEL,
+            max_tokens=8192,
+            system="You adapt HTML templates to new content. Keep the layout, change the content. Return only HTML.",
+            messages=[{"role": "user", "content": adapt_prompt}],
+        )
+
+        html = response.content[0].text.strip()
+        if html.startswith("```"):
+            html = html.split("\n", 1)[1]
+            if html.endswith("```"):
+                html = html[:-3]
+            html = html.strip()
+
+        logger.info(f"Adapted saved template ({len(html)} chars)")
+        return html
+
+    except Exception as e:
+        logger.error(f"Template adaptation failed: {e}")
+        # Fall through — caller should generate fresh
+        raise

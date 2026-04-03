@@ -19,7 +19,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaInMemoryUpload
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,83 @@ def _get_file_name_sync(file_id: str) -> str:
     return meta.get("name", f"{file_id}.jpg")
 
 
+def _ensure_subfolder_sync(parent_folder_id: str, name: str) -> str:
+    """Get or create a subfolder by name. Returns the folder ID."""
+    svc = _get_service()
+    # Check if it already exists
+    query = (
+        f"'{parent_folder_id}' in parents and trashed = false "
+        f"and mimeType = 'application/vnd.google-apps.folder' "
+        f"and name = '{name}'"
+    )
+    result = svc.files().list(q=query, fields="files(id, name)").execute()
+    files = result.get("files", [])
+    if files:
+        return files[0]["id"]
+
+    # Create it
+    meta = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_folder_id],
+    }
+    folder = svc.files().create(body=meta, fields="id").execute()
+    logger.info(f"Created Drive subfolder '{name}' in {parent_folder_id}")
+    return folder["id"]
+
+
+def _upload_html_sync(folder_id: str, filename: str, html_content: str) -> str:
+    """Upload an HTML file to Drive. Returns the file ID."""
+    svc = _get_service()
+    media = MediaInMemoryUpload(html_content.encode("utf-8"), mimetype="text/html")
+    meta = {
+        "name": filename,
+        "parents": [folder_id],
+    }
+    f = svc.files().create(body=meta, media_body=media, fields="id").execute()
+    logger.info(f"Uploaded {filename} to Drive folder {folder_id}")
+    return f["id"]
+
+
+def _upload_image_sync(folder_id: str, filename: str, image_bytes: bytes, mimetype: str = "image/jpeg") -> str:
+    """Upload an image to Drive. Returns the file ID."""
+    svc = _get_service()
+    media = MediaInMemoryUpload(image_bytes, mimetype=mimetype)
+    meta = {
+        "name": filename,
+        "parents": [folder_id],
+    }
+    f = svc.files().create(body=meta, media_body=media, fields="id").execute()
+    logger.info(f"Uploaded image {filename} to Drive folder {folder_id}")
+    return f["id"]
+
+
+def _list_html_files_sync(folder_id: str) -> list[dict]:
+    """List HTML files in a folder. Returns [{id, name, createdTime}]."""
+    svc = _get_service()
+    query = (
+        f"'{folder_id}' in parents and trashed = false "
+        f"and (mimeType = 'text/html' or name contains '.html')"
+    )
+    result = svc.files().list(
+        q=query, fields="files(id, name, createdTime)",
+        orderBy="createdTime desc",
+    ).execute()
+    return result.get("files", [])
+
+
+def _download_text_sync(file_id: str) -> str:
+    """Download a text file from Drive and return its content."""
+    svc = _get_service()
+    request = svc.files().get_media(fileId=file_id)
+    buf = io.BytesIO()
+    downloader = MediaIoBaseDownload(buf, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buf.getvalue().decode("utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Async wrappers
 # ---------------------------------------------------------------------------
@@ -147,3 +224,23 @@ async def download_file(file_id: str, dest_path: Path) -> Path:
 
 async def get_file_name(file_id: str) -> str:
     return await asyncio.to_thread(_get_file_name_sync, file_id)
+
+
+async def ensure_subfolder(parent_folder_id: str, name: str) -> str:
+    return await asyncio.to_thread(_ensure_subfolder_sync, parent_folder_id, name)
+
+
+async def upload_html(folder_id: str, filename: str, html_content: str) -> str:
+    return await asyncio.to_thread(_upload_html_sync, folder_id, filename, html_content)
+
+
+async def upload_image(folder_id: str, filename: str, image_bytes: bytes, mimetype: str = "image/jpeg") -> str:
+    return await asyncio.to_thread(_upload_image_sync, folder_id, filename, image_bytes, mimetype)
+
+
+async def list_html_files(folder_id: str) -> list[dict]:
+    return await asyncio.to_thread(_list_html_files_sync, folder_id)
+
+
+async def download_text(file_id: str) -> str:
+    return await asyncio.to_thread(_download_text_sync, file_id)

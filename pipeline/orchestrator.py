@@ -21,6 +21,11 @@ from pipeline.steps.render import render
 from pipeline.steps.dynamic_template import generate_dynamic_template, get_client_preferences, fix_template_from_critique
 from pipeline.steps.critique import critique_render, needs_revision, format_critique_for_fix
 from pipeline.steps.brain_write import brain_write
+from pipeline.steps.design_scout import (
+    extract_layout_tags, store_layout_tags, detect_staleness,
+    get_scout_inspiration, run_design_scout_auto,
+    _get_taste_description, _get_client_brand_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,7 @@ async def run_pipeline(
     previous_decisions: list[dict] | None = None,
     image_source: str = "auto",
     forced_reference: dict | None = None,
+    forced_layout_blueprint: str | None = None,
 ) -> PipelineResult:
     """
     Run the full creative generation pipeline.
@@ -107,6 +113,14 @@ async def run_pipeline(
         if client_prefs:
             await _notify("decisions", f"Found preferences for {input.client}")
 
+        # Inject scout font names into prefs if available
+        from pipeline.steps.font_pool import get_scout_font_names
+        scout_fonts = get_scout_font_names(brain)
+        if scout_fonts:
+            if not client_prefs:
+                client_prefs = {}
+            client_prefs["scout_fonts"] = scout_fonts
+
         # Step 6: Creative Decisions (Opus)
         await _notify("decisions", "Opus is picking headline, font, colors...")
         decisions = await creative_decisions(input, concept, copy, image, brain_ctx, previous_decisions, client_prefs)
@@ -122,12 +136,40 @@ async def run_pipeline(
         if has_logo:
             await _notify("template", f"Found logo for {input.client}")
 
+        # Anti-repetition: check if recent layouts are getting stale
+        staleness = detect_staleness(brain, client=input.client)
+        scout_hint = None
+        if staleness.get("is_stale") and not forced_reference:
+            await _notify("scout", "Layouts getting repetitive — checking for fresh ideas...")
+            # Try stored scout data first
+            scout_hint = get_scout_inspiration(brain, input.client, staleness)
+            if not scout_hint and staleness.get("should_scout"):
+                # Very stale + no scout data → run light Perplexity scout automatically
+                await _notify("scout", "Searching for fresh design inspiration...")
+                scout_result = await run_design_scout_auto(brain, client=input.client, staleness=staleness)
+                if scout_result.get("stored"):
+                    scout_hint = get_scout_inspiration(brain, input.client, staleness)
+                    await _notify("scout", f"Found {scout_result.get('layouts_found', 0)} fresh layouts")
+
         # Step 6b: Dynamic Template (Opus generates fresh layout from inspiration)
         if forced_reference:
             await _notify("template", "Replicating the layout from your inspiration image...")
         else:
             await _notify("template", "Generating unique layout from your inspiration...")
-        dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=has_logo, forced_reference=forced_reference)
+        # Build anti-repetition context for template generation
+        anti_repetition_ctx = ""
+        # Forced blueprint from scout takes priority
+        if forced_layout_blueprint:
+            anti_repetition_ctx = forced_layout_blueprint
+        elif staleness.get("avoid_instructions"):
+            anti_repetition_ctx += staleness["avoid_instructions"] + "\n\n"
+        if not forced_layout_blueprint and scout_hint:
+            anti_repetition_ctx += scout_hint
+
+        dynamic_html = await generate_dynamic_template(
+            decisions, brain, has_logo=has_logo, forced_reference=forced_reference,
+            client=input.client, anti_repetition=anti_repetition_ctx or None,
+        )
         await _notify("template", "Layout ready")
 
         # Count image slots in template — generate extra images if needed
@@ -155,18 +197,22 @@ async def run_pipeline(
             if iteration > MAX_REVISIONS:
                 break
 
-            # Critique the render
+            # Critique the render — with taste + client brand context
             await _notify("critique", f"Art director reviewing design (pass {iteration})...")
+            taste_ctx = _get_taste_description(brain, client=input.client if input.client != "ALL" else None)
+            client_ctx = _get_client_brand_context(brain, input.client) if input.client != "ALL" else None
             critique = await critique_render(
                 render_result.final_image_path, decisions, current_html,
                 iteration=iteration, forced_reference=forced_reference,
+                taste_context=taste_ctx or None,
+                client_context=client_ctx or None,
             )
             score = critique.get("score", 5)
-            await _notify("critique", f"Score: {score}/10")
+            logger.info(f"Critique score: {score}/10")  # Kept in logs only
 
             if not needs_revision(critique):
                 logger.info(f"Design approved at score {score}/10 on iteration {iteration}")
-                await _notify("critique", f"✓ Design approved ({score}/10)")
+                await _notify("critique", "✓ Design approved")
                 break
 
             # Fix the template based on critique
@@ -185,6 +231,14 @@ async def run_pipeline(
         await _notify("brain_write", "Storing concept in Big Brain...")
         await brain_write(input, concept, copy, decisions, image, brain)
         await _notify("brain_write", "Stored ✓")
+
+        # Step 9: Layout tracking (for anti-repetition — uses Haiku, ~$0.001)
+        try:
+            layout_tags = await extract_layout_tags(result.image_path)
+            if layout_tags:
+                store_layout_tags(brain, input.client, layout_tags, headline=decisions.headline)
+        except Exception as e:
+            logger.warning(f"Layout tag extraction failed (non-critical): {e}")
 
         result.success = True
         elapsed = time.time() - start
@@ -252,7 +306,7 @@ async def run_carousel(
     # Lock the design from post 1
     locked_decisions = first.decisions
     # Generate the template HTML once and reuse
-    locked_html = await generate_dynamic_template(locked_decisions, brain, has_logo=logo_b64 is not None)
+    locked_html = await generate_dynamic_template(locked_decisions, brain, has_logo=logo_b64 is not None, client=input.client)
 
     # ── Posts 2-N: new concept + image, same design ──
     for i in range(2, count + 1):
@@ -355,7 +409,7 @@ async def _generate_carousel_slide(
         if locked_template_html:
             render_result = await render(decisions, image, input.client, dynamic_html=locked_template_html, logo_b64=logo_b64)
         else:
-            dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=logo_b64 is not None)
+            dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=logo_b64 is not None, client=input.client)
             render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html, logo_b64=logo_b64)
 
         result.image_path = render_result.final_image_path

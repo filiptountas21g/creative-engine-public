@@ -6,6 +6,7 @@ load_dotenv(override=True)
 # ── AI Models ──────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "3bfbe7cb7f9e8b80dfad7c063b5f7fe85385dc48")
 FAL_KEY = os.getenv("FAL_KEY", "")
 IDEOGRAM_API_KEY = os.getenv("IDEOGRAM_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
@@ -26,6 +27,8 @@ TURSO_AUTH_TOKEN = os.environ["TURSO_AUTH_TOKEN"]
 
 # ── Google Drive ───────────────────────────────────────────
 DRIVE_INSPIRATION_FOLDER_ID = os.getenv("DRIVE_INSPIRATION_FOLDER_ID", "")
+DRIVE_TEMPLATES_FOLDER_ID = os.getenv("DRIVE_TEMPLATES_FOLDER_ID", "120SLEQNFbY8mbw5w1LO2mjmclkGpK_cu")
+DRIVE_SCOUT_FOLDER_ID = os.getenv("DRIVE_SCOUT_FOLDER_ID", "")  # Auto-creates subfolder under templates if empty
 DRIVE_WATCH_INTERVAL = int(os.getenv("DRIVE_WATCH_INTERVAL", "60"))  # seconds
 
 # ── Rendering ──────────────────────────────────────────────

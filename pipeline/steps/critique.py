@@ -43,6 +43,10 @@ Focus on these categories:
 6. LAYOUT ISSUES — are elements overlapping badly? Is anything cut off or hidden?
    Are there empty areas that feel unintentional?
 7. COLOR HARMONY — do the colors work together? Does the accent color pop appropriately?
+8. COLOR ACCURACY — CRITICAL: Compare the ACTUAL colors you see in the rendered image against
+   the INTENDED colors from the design decisions. If the background is supposed to be #FFFFFF (white)
+   but you see a dark blue background, that is a CRITICAL issue. Same for text color, accent color.
+   The rendered output MUST match the intended color values. Any mismatch is a critical bug.
 
 Be SPECIFIC and ACTIONABLE. Don't say "improve spacing" — say "the headline needs 20px more top margin to breathe."
 Don't say "fix colors" — say "the headline text (#2A2A2A) doesn't have enough contrast against the image behind it — add a semi-transparent overlay or move text to the solid background area."
@@ -71,6 +75,8 @@ async def critique_render(
     template_html: str,
     iteration: int = 1,
     forced_reference: dict | None = None,
+    taste_context: str | None = None,
+    client_context: str | None = None,
 ) -> dict:
     """
     Have Claude Vision critique a rendered post.
@@ -99,6 +105,25 @@ async def critique_render(
             f"Do NOT suggest changing the layout to something different from the reference."
         )
 
+    # Build taste context — reviewer checks if design matches current aesthetic
+    taste_section = ""
+    if taste_context:
+        taste_section = (
+            f"\n\nDESIGNER'S CURRENT TASTE PROFILE (recent preferences weighted higher):\n"
+            f"{taste_context}\n"
+            f"Consider whether this design feels aligned with this aesthetic. "
+            f"If it's drifting away from these preferences without a good reason, flag it."
+        )
+
+    # Build client brand context
+    client_section = ""
+    if client_context:
+        client_section = (
+            f"\n\nCLIENT BRAND CONTEXT:\n"
+            f"{client_context}\n"
+            f"The design must respect the client's brand identity."
+        )
+
     content = [
         {
             "type": "text",
@@ -113,7 +138,9 @@ async def critique_render(
                 f"  Template style: {decisions.template}\n"
                 f"  Image padding: {decisions.image_padding}px\n"
                 f"  Headline position: margins ({decisions.headline_margin_x}px, {decisions.headline_margin_y}px)\n"
-                f"{reference_context}\n\n"
+                f"{reference_context}"
+                f"{taste_section}"
+                f"{client_section}\n\n"
                 f"Look at the rendered result and tell me what needs fixing.\n"
                 f"Be harsh but specific — this needs to look like it came from a top design agency."
             ),
