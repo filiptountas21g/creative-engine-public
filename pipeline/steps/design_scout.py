@@ -423,6 +423,18 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
         patterns = [v.split(" (")[0] for v in staleness["repeated_patterns"].values()]
         avoid_hint = f"Recently overused layouts: {', '.join(patterns)}. Find something structurally different."
 
+    # Pull rejection history from Brain — things the user has explicitly said they don't like
+    rejection_hint = ""
+    try:
+        rejections = brain.query(topic="taste_rejected", limit=10)
+        if rejections:
+            reasons = [r.get("summary", "").replace("Scout rejected: ", "") for r in rejections if r.get("summary")]
+            if reasons:
+                rejection_hint = f"User has previously rejected scout results for: {'; '.join(reasons[:5])}. Avoid these."
+                logger.info(f"Scout rejection history: {rejection_hint}")
+    except Exception:
+        pass
+
     exclude_hint = ""
     if seen_urls:
         import re
@@ -454,8 +466,10 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
             "content": (
                 f"Taste profile: {taste_text if taste_text else 'high quality editorial brand design'}\n"
                 f"Industry context: {industry}\n"
+                f"{rejection_hint}\n"
                 f"{focus_text}\n"
-                f"Give me visual style keywords for this aesthetic."
+                f"Give me visual style keywords for this aesthetic. "
+                f"{'Avoid keywords related to: ' + rejection_hint if rejection_hint else ''}"
             ),
         }],
     )

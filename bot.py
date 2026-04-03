@@ -501,7 +501,9 @@ TOOLS = [
             "Approve specific design references from the scout results and save them to Brain. "
             "Use AFTER scout_designs has shown the preview list. "
             "User says which ones to keep: '1, 3, 5' or 'all' or 'none'. "
-            "Only approved designs get processed and stored."
+            "Only approved designs get processed and stored. "
+            "If the user says WHY they don't like the results (e.g. 'none, too colorful' or "
+            "'skip, I hate these layouts'), capture that reason in the feedback field."
         ),
         "input_schema": {
             "type": "object",
@@ -514,6 +516,10 @@ TOOLS = [
                 "all": {
                     "type": "boolean",
                     "description": "Set to true if user wants all items approved",
+                },
+                "feedback": {
+                    "type": "string",
+                    "description": "Why the user didn't like the results, if they said so. E.g. 'too colorful', 'not editorial enough', 'too tutorial-like'. Stored to improve future scouts.",
                 },
             },
             "required": [],
@@ -1547,11 +1553,25 @@ async def _exec_approve_scout(params: dict, user_id: int, msg) -> str:
     else:
         selected = params.get("selected", [])
 
+    feedback = params.get("feedback", "").strip()
+
     if not selected:
-        # Clear pending
+        # Store rejection reason in Brain so future scouts avoid this
+        if feedback:
+            brain.store(
+                topic="taste_rejected",
+                source="scout_feedback",
+                content=feedback,
+                client=pending.get("client", "ALL"),
+                summary=f"Scout rejected: {feedback}",
+                tags=["scout_rejection", "avoid"],
+            )
+            logger.info(f"Stored scout rejection feedback: {feedback}")
+            await msg.reply_text(f"👍 Noted — I'll avoid {feedback} next time I search.")
+        else:
+            await msg.reply_text("👍 No designs saved. Scout results cleared.")
         _pending_scout.pop(user_id, None)
-        await msg.reply_text("👍 No designs saved. Scout results cleared.")
-        return "User declined all scout results."
+        return f"User declined all scout results.{' Reason: ' + feedback if feedback else ''}"
 
     status_msg = await msg.reply_text(f"⏳ Processing {len(selected)} approved designs...")
 
