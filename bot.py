@@ -1444,95 +1444,64 @@ async def _exec_scout_designs(params: dict, user_id: int, msg) -> str:
         import httpx as _httpx
         import io
 
-        # Download image bytes — Railway needs bytes since Telegram can't reach all CDN URLs
-        async def _fetch_image(item: dict) -> tuple[dict, bytes | None]:
-            domain = item.get("domain", "")
-            referer_map = {
-                "pinterest.com": "https://www.pinterest.com/",
-                "behance.net": "https://www.behance.net/",
-                "dribbble.com": "https://dribbble.com/",
-                "instagram.com": "https://www.instagram.com/",
-            }
-            referer = next((v for k, v in referer_map.items() if k in domain), "https://www.google.com/")
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": referer,
-                "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-            # Try direct URL first, then Google thumbnail fallback
-            urls_to_try = [u for u in [item.get("image_url", ""), item.get("thumbnail_url", "")] if u]
-            for url in urls_to_try:
-                try:
-                    async with _httpx.AsyncClient(timeout=25, follow_redirects=True) as hc:
-                        resp = await hc.get(url, headers=headers)
-                    if resp.status_code == 200 and len(resp.content) > 3000:
-                        logger.info(f"Scout image {item['index']}: downloaded {len(resp.content)} bytes from {url[:60]}")
-                        return item, resp.content
-                    else:
-                        logger.warning(f"Scout image {item['index']}: {resp.status_code} from {url[:60]}")
-                except Exception as e:
-                    logger.warning(f"Scout image {item['index']} fetch failed ({url[:60]}): {e}")
-            return item, None
-
-        fetch_tasks = [_fetch_image(item) for item in items]
-        fetched = await _asyncio.gather(*fetch_tasks)
-
-        success_count = sum(1 for _, b in fetched if b is not None)
-        logger.info(f"Scout: {success_count}/{len(items)} images downloaded successfully")
-
-        # Send photos individually (more reliable than media groups for varied sources)
-        from telegram import InputMediaPhoto
+        # Send each photo by passing URL directly to Telegram (Telegram downloads it)
+        # Falls back to downloading bytes ourselves if Telegram rejects the URL
         sent_count = 0
-        group = []
 
-        async def _flush_group(grp: list):
-            if not grp:
-                return
-            try:
-                await msg.reply_media_group(media=grp)
-            except Exception as e:
-                logger.warning(f"Media group failed, sending individually: {e}")
-                for med in grp:
-                    try:
-                        await msg.reply_photo(photo=med.media, caption=med.caption, parse_mode="HTML")
-                    except Exception as e2:
-                        logger.warning(f"Individual photo send failed: {e2}")
-
-        for item, img_bytes in fetched:
+        async def _send_one(item: dict):
+            nonlocal sent_count
             idx = item["index"]
             name = item.get("name", "Design")
             description = item.get("description", "")[:180]
             domain = item.get("domain", "")
             page_url = item.get("url", "")
+            image_url = item.get("image_url", "")
+            thumbnail_url = item.get("thumbnail_url", "")
 
             caption = f"<b>{idx}. {name}</b>\n{description}\n📍 {domain}"
             if page_url:
                 caption += f"\n🔗 {page_url}"
             caption = caption[:1024]
 
-            if img_bytes:
-                group.append(InputMediaPhoto(
-                    media=io.BytesIO(img_bytes),
-                    caption=caption,
-                    parse_mode="HTML",
-                ))
-                sent_count += 1
-            else:
-                # No image — send text with link so user can still reference it
-                await _flush_group(group)
-                group = []
+            # Strategy 1: pass URL directly — Telegram downloads it (no Railway egress)
+            urls_to_try_direct = [u for u in [image_url, thumbnail_url] if u]
+            for url in urls_to_try_direct:
                 try:
-                    await msg.reply_text(f"{idx}. {name} — {page_url or domain}", parse_mode=None)
-                except Exception:
-                    pass
-                sent_count += 1
+                    await msg.reply_photo(photo=url, caption=caption, parse_mode="HTML")
+                    logger.info(f"Scout image {idx}: sent via URL ({url[:60]})")
+                    sent_count += 1
+                    return
+                except Exception as e:
+                    logger.warning(f"Scout image {idx}: Telegram URL send failed ({url[:60]}): {e}")
 
-            if len(group) == 10:
-                await _flush_group(group)
-                group = []
+            # Strategy 2: download bytes ourselves and upload
+            for url in urls_to_try_direct:
+                try:
+                    async with _httpx.AsyncClient(timeout=25, follow_redirects=True) as hc:
+                        resp = await hc.get(url, headers={
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                            "Referer": "https://www.google.com/",
+                        })
+                    if resp.status_code == 200 and len(resp.content) > 3000:
+                        await msg.reply_photo(photo=io.BytesIO(resp.content), caption=caption, parse_mode="HTML")
+                        logger.info(f"Scout image {idx}: sent via bytes ({len(resp.content)} bytes)")
+                        sent_count += 1
+                        return
+                except Exception as e:
+                    logger.warning(f"Scout image {idx}: bytes download failed ({url[:60]}): {e}")
 
-        await _flush_group(group)
+            # Strategy 3: text-only fallback
+            logger.warning(f"Scout image {idx}: all strategies failed, sending text")
+            try:
+                await msg.reply_text(f"{idx}. {name} — {page_url or domain}")
+            except Exception:
+                pass
+            sent_count += 1
+
+        # Send all items sequentially (Telegram rate limits media sends)
+        for item in items:
+            await _send_one(item)
+            await _asyncio.sleep(0.3)  # Avoid Telegram flood limits
 
         # Final instruction
         await msg.reply_text(
