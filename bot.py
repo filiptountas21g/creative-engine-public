@@ -1438,17 +1438,15 @@ async def _exec_scout_designs(params: dict, user_id: int, msg) -> str:
             stale_desc = ", ".join(f"{v}" for v in patterns.values())
             await msg.reply_text(f"⚠️ Detected repetition in recent posts: {stale_desc}")
 
-        await msg.reply_text(f"🔍 Found {len(items)} designs — downloading images...")
+        await msg.reply_text(f"🔍 Found {len(items)} designs — sending previews...")
 
-        # Download all images in parallel
-        import httpx as _httpx
         import asyncio as _asyncio
+        import httpx as _httpx
         import io
 
+        # Download image bytes — Railway needs bytes since Telegram can't reach all CDN URLs
         async def _fetch_image(item: dict) -> tuple[dict, bytes | None]:
             domain = item.get("domain", "")
-
-            # Domain-specific Referer headers to bypass hotlink protection
             referer_map = {
                 "pinterest.com": "https://www.pinterest.com/",
                 "behance.net": "https://www.behance.net/",
@@ -1460,28 +1458,33 @@ async def _exec_scout_designs(params: dict, user_id: int, msg) -> str:
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Referer": referer,
                 "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
             }
-
-            # Try direct imageUrl first, then Google's cached thumbnail as fallback
+            # Try direct URL first, then Google thumbnail fallback
             urls_to_try = [u for u in [item.get("image_url", ""), item.get("thumbnail_url", "")] if u]
             for url in urls_to_try:
                 try:
-                    async with _httpx.AsyncClient(timeout=20, follow_redirects=True) as hc:
+                    async with _httpx.AsyncClient(timeout=25, follow_redirects=True) as hc:
                         resp = await hc.get(url, headers=headers)
                     if resp.status_code == 200 and len(resp.content) > 3000:
+                        logger.info(f"Scout image {item['index']}: downloaded {len(resp.content)} bytes from {url[:60]}")
                         return item, resp.content
+                    else:
+                        logger.warning(f"Scout image {item['index']}: {resp.status_code} from {url[:60]}")
                 except Exception as e:
-                    logger.warning(f"Image fetch failed ({url[:60]}): {e}")
+                    logger.warning(f"Scout image {item['index']} fetch failed ({url[:60]}): {e}")
             return item, None
 
-        # Fetch all in parallel
         fetch_tasks = [_fetch_image(item) for item in items]
         fetched = await _asyncio.gather(*fetch_tasks)
 
-        # Send as media groups (max 10 per group) — much faster than individual sends
+        success_count = sum(1 for _, b in fetched if b is not None)
+        logger.info(f"Scout: {success_count}/{len(items)} images downloaded successfully")
+
+        # Send photos individually (more reliable than media groups for varied sources)
         from telegram import InputMediaPhoto
-        group = []
         sent_count = 0
+        group = []
 
         async def _flush_group(grp: list):
             if not grp:
@@ -1489,13 +1492,12 @@ async def _exec_scout_designs(params: dict, user_id: int, msg) -> str:
             try:
                 await msg.reply_media_group(media=grp)
             except Exception as e:
-                logger.warning(f"Media group send failed: {e}")
-                # Fallback: send individually
+                logger.warning(f"Media group failed, sending individually: {e}")
                 for med in grp:
                     try:
                         await msg.reply_photo(photo=med.media, caption=med.caption, parse_mode="HTML")
-                    except Exception:
-                        pass
+                    except Exception as e2:
+                        logger.warning(f"Individual photo send failed: {e2}")
 
         for item, img_bytes in fetched:
             idx = item["index"]
@@ -1517,21 +1519,19 @@ async def _exec_scout_designs(params: dict, user_id: int, msg) -> str:
                 ))
                 sent_count += 1
             else:
-                # Flush current group before sending text-only item
+                # No image — send text with link so user can still reference it
                 await _flush_group(group)
                 group = []
                 try:
-                    await msg.reply_text(caption, parse_mode="HTML")
+                    await msg.reply_text(f"{idx}. {name} — {page_url or domain}", parse_mode=None)
                 except Exception:
-                    await msg.reply_text(f"{idx}. {name}\n{description}")
+                    pass
                 sent_count += 1
 
-            # Flush group when it hits 10
             if len(group) == 10:
                 await _flush_group(group)
                 group = []
 
-        # Flush any remaining
         await _flush_group(group)
 
         # Final instruction
