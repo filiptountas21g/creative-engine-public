@@ -441,38 +441,42 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
         model=config.SONNET_MODEL,
         max_tokens=600,
         system=(
-            "You write search queries that find SPECIFIC individual design projects — NOT template pages or galleries.\n\n"
-            "GOOD QUERIES (find specific projects):\n"
-            "  'site:behance.net social media campaign healthcare brand editorial 2025'\n"
-            "  'site:dribbble.com shots social media post design minimal typography'\n"
-            "  'site:pinterest.com pin brand social media post design warm tones serif'\n"
-            "  'site:instagram.com brand campaign post design agency portfolio'\n"
-            "  '\"social media design\" \"case study\" agency portfolio healthcare brand 2025'\n\n"
-            "BAD QUERIES (return template marketplaces and listicles):\n"
-            "  'best social media design trends 2026' → gets generic articles\n"
-            "  'social media templates' → gets Canva/Envato/Freepik template pages\n"
-            "  'graphic design inspiration' → gets Pinterest boards not individual pins\n\n"
-            "ALWAYS use site: filters for at least 2 of the 3 queries.\n"
-            "Target: Behance PROJECT pages, Dribbble SHOTS, Pinterest individual PINS, "
-            "Instagram POSTS, agency CASE STUDIES.\n\n"
-            "Return EXACTLY 3 search queries, one per line. No numbering, no quotes, no explanation.\n"
-            "Each query should search a DIFFERENT angle:\n"
-            "1. site:behance.net — specific project in the industry\n"
-            "2. site:dribbble.com OR site:pinterest.com — matching the taste\n"
-            "3. Agency case study or brand-specific work"
+            "You write Google Image search queries that find FINISHED SOCIAL MEDIA POST DESIGNS "
+            "— the actual square/portrait graphics a brand posts on Instagram or LinkedIn.\n\n"
+            "CRITICAL: We want FINISHED POSTS, not:\n"
+            "  ✗ Font specimen sheets or typeface showcases\n"
+            "  ✗ Logo design or brand identity work\n"
+            "  ✗ Website or app UI screenshots\n"
+            "  ✗ Design articles or tutorials\n"
+            "  ✗ Template marketplace listings\n"
+            "  ✗ Typography posters\n\n"
+            "We want:\n"
+            "  ✓ Instagram post designs with headline + image + brand name\n"
+            "  ✓ Social media graphics showing a product or concept\n"
+            "  ✓ Agency-made brand campaign posts\n"
+            "  ✓ Square or portrait format marketing creatives\n\n"
+            "GOOD QUERY PATTERNS:\n"
+            "  site:behance.net social media posts campaign brand {industry} 2025\n"
+            "  site:dribbble.com instagram post design brand {mood} layout\n"
+            "  site:pinterest.com instagram post graphic design brand campaign minimal\n\n"
+            "ALWAYS include 'social media post' OR 'instagram post' OR 'brand campaign post' in each query.\n"
+            "NEVER use just typography or font terms without 'social media post' context.\n"
+            "Use site: filters for at least 2 of the 3 queries.\n\n"
+            "Return EXACTLY 3 queries, one per line. No numbering, no quotes, no explanation."
         ),
         messages=[{
             "role": "user",
             "content": (
                 f"{'CLIENT MODE: ' + client if client and client != 'ALL' else 'GLOBAL MODE (personal taste only)'}\n"
                 f"Industry: {industry}\n"
-                f"Taste profile + context:\n{taste_text}\n"
+                f"Designer taste (use for mood/color/composition direction, NOT font terms):\n{taste_text}\n"
                 f"{avoid_hint}\n"
                 f"{exclude_hint}\n"
                 f"{focus_text}\n\n"
-                f"Write 3 search queries to find SPECIFIC individual design projects (not template galleries). "
-                f"{'Blend the designer taste with the client brand context.' if client and client != 'ALL' else 'Focus purely on the designer taste.'} "
-                f"Each from a different source. Prioritize 2024-2026 work."
+                f"Write 3 image search queries to find FINISHED SOCIAL MEDIA POST DESIGNS. "
+                f"Each query MUST target actual posts (Instagram/brand campaign graphics), not fonts or logos. "
+                f"Each from a different source (Behance, Dribbble/Pinterest, open web). "
+                f"Prioritize 2024-2026 work."
             ),
         }],
     )
@@ -497,12 +501,12 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
     # Fallback if Claude gave less than 3
     if len(queries) < 2:
         queries.append((
-            f"site:behance.net social media campaign {industry} brand design project 2025",
+            f"site:behance.net instagram post design brand campaign {industry} social media graphic 2025",
             f"Industry: {industry}",
         ))
     if len(queries) < 3:
         queries.append((
-            "site:dribbble.com shots social media post design editorial typography minimal 2025",
+            "site:pinterest.com instagram post design brand campaign minimal editorial social media graphic",
             "Experimental",
         ))
 
@@ -670,12 +674,18 @@ async def scout_search(
         model=config.SONNET_MODEL,
         max_tokens=2000,
         system=(
-            "You are a senior art director picking design inspiration from image search results.\n"
-            "You see a list of images found on Pinterest, Behance, Dribbble, and other design sites.\n"
-            "Pick the best matches for the user's taste — aim for 15 results so the user can\n"
-            "react to a wide range and help refine the taste profile over time.\n"
-            "Prefer images from pinterest.com, behance.net, dribbble.com over generic sites.\n"
-            "Describe SPECIFICALLY what the design looks like based on its title and source.\n"
+            "You are a senior art director curating SOCIAL MEDIA POST designs for inspiration.\n"
+            "You are looking for FINISHED POSTS — the kind a brand actually publishes on Instagram or LinkedIn.\n\n"
+            "INCLUDE: brand campaign posts, product posts, editorial graphics, lifestyle posts, "
+            "announcement posts — anything that looks like a real published social media graphic.\n\n"
+            "EXCLUDE (skip these entirely):\n"
+            "  - Font specimen sheets or typeface showcases (stacked words showing font weights)\n"
+            "  - Logo design or brand identity work\n"
+            "  - Website screenshots or UI/app mockups\n"
+            "  - Design tutorials or how-to guides\n"
+            "  - Template marketplace previews\n"
+            "  - YouTube thumbnails or video covers\n\n"
+            "Prefer images from pinterest.com, behance.net, dribbble.com.\n"
             "Return ONLY valid JSON."
         ),
         messages=[{
@@ -683,26 +693,25 @@ async def scout_search(
             "content": f"""My taste profile (recent preferences weighted higher):
 {taste_text}
 
-Here are design images found across Pinterest, Behance, Dribbble and more.
-Pick up to 15 that would make interesting layout inspiration — include a range of styles
-so I can react to them and help refine the taste profile.
+Here are images found via search. I need SOCIAL MEDIA POST designs only.
+Pick up to 15 that are actual finished social media posts (not fonts, not logos, not UI).
+Include a range of layouts and styles so I can react and refine taste.
 
 IMAGES FOUND:
 {images_summary}
 
-Return JSON array with the index numbers of the images you pick:
+Return JSON array:
 [
   {{
     "index": <number from the list above>,
     "name": "Short name 5 words max",
-    "description": "Specific visual details — layout structure, typography style, color palette, mood",
-    "why_relevant": "Why this matches my taste or would be interesting to explore"
+    "description": "Layout, composition, mood — what the post actually looks like",
+    "why_relevant": "Why this is useful as social media post inspiration"
   }},
   ...
 ]
 
-Include designs that closely match my taste AND a few that are slightly different/experimental.
-Skip template pages, tutorials, or anything that's clearly not a specific design.
+SKIP anything that looks like a font showcase, logo, UI screenshot, or tutorial.
 Return ONLY the JSON array."""
         }],
     )
