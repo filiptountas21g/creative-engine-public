@@ -436,64 +436,48 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
 
     focus_text = f"User specifically wants: {user_focus}" if user_focus else ""
 
+    # Ask Claude for style words only — not full queries
+    # This prevents Claude from writing education-oriented queries like "social media post design tips"
     _ai = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     response = _ai.messages.create(
         model=config.SONNET_MODEL,
-        max_tokens=600,
+        max_tokens=200,
         system=(
-            "You are a creative director helping a social media designer find layout inspiration.\n\n"
-            "The designer is looking for finished social media post designs they can study and replicate "
-            "— real brand posts, agency campaign graphics, editorial Instagram posts. "
-            "Not fonts, not logos, not UI, not articles.\n\n"
-            "You will be shown the designer's taste profile and context. "
-            "Write 3 Google Image search queries that would find posts matching their aesthetic. "
-            "Think like a designer who knows exactly what they're after — use specific visual language "
-            "(mood, composition, color temperature, layout style) not generic terms.\n\n"
-            "Use site: filters to target Behance, Dribbble, or Pinterest for at least 2 queries.\n"
-            "Return EXACTLY 3 queries, one per line. No numbering, no explanation."
+            "You extract visual style keywords from a designer's taste profile.\n"
+            "Return 6-8 keywords describing mood, color, composition, and aesthetic — "
+            "things like: minimal, editorial, warm, bold, geometric, asymmetric, clean, luxury, vibrant.\n"
+            "No font names. No industry names. Just visual descriptors.\n"
+            "Return keywords as a single comma-separated line. Nothing else."
         ),
         messages=[{
             "role": "user",
             "content": (
-                f"Context: {'designing for client ' + client if client and client != 'ALL' else 'exploring personal taste'}\n"
-                f"Industry: {industry}\n\n"
-                f"My taste profile:\n{taste_text if taste_text else 'No taste data yet — find a variety of high-quality editorial and minimal brand post styles'}\n\n"
-                f"{avoid_hint}\n"
-                f"{exclude_hint}\n"
-                f"{focus_text}\n\n"
-                f"What 3 image searches would find social media post designs matching this aesthetic? "
-                f"Prioritize 2024-2026 work. "
-                f"Do NOT use quoted phrases — they kill results. Use plain keywords only."
+                f"Taste profile: {taste_text if taste_text else 'high quality editorial brand design'}\n"
+                f"Industry context: {industry}\n"
+                f"{focus_text}\n"
+                f"Give me visual style keywords for this aesthetic."
             ),
         }],
     )
 
-    raw = response.content[0].text.strip()
-    lines = [line.strip() for line in raw.split("\n") if line.strip() and not line.strip().startswith(("#", "//"))]
+    style_words = response.content[0].text.strip().strip('"').strip("'")
+    logger.info(f"Scout style words: {style_words}")
 
-    # Clean up any numbering
-    import re
-    cleaned = []
-    for line in lines[:3]:
-        line = re.sub(r'^[\d]+[\.\)\-]\s*', '', line).strip().strip('"').strip("'")
-        if len(line) > 20:
-            cleaned.append(line)
+    # Build reliable query structures — Claude fills style, we control structure
+    # These patterns actually return brand work, not design tutorials
+    base = f"{industry} brand" if industry and industry != "business and design" else "brand"
+    client_hint = f"{client} brand" if client and client != "ALL" else base
 
-    labels = [f"Industry: {industry}", "Portfolio scouting", "Experimental"]
-    queries = []
-    for i, q in enumerate(cleaned):
-        label = labels[i] if i < len(labels) else f"Search {i+1}"
-        queries.append((q, label))
+    queries = [
+        (f"site:behance.net {client_hint} campaign instagram post {style_words} 2025", "Behance campaigns"),
+        (f"site:dribbble.com {base} instagram post {style_words} layout", "Dribbble shots"),
+        (f"site:pinterest.com {base} campaign post {style_words} editorial", "Pinterest pins"),
+    ]
 
-    # Fallback if Claude gave less than 3
-    if len(queries) < 2:
+    if avoid_hint:
+        # Add a 4th query that explicitly goes for something different
         queries.append((
-            f"site:behance.net instagram post design brand campaign {industry} social media graphic 2025",
-            f"Industry: {industry}",
-        ))
-    if len(queries) < 3:
-        queries.append((
-            "site:pinterest.com instagram post design brand campaign minimal editorial social media graphic",
+            f"site:behance.net brand social media creative {style_words} 2024 2025",
             "Experimental",
         ))
 
