@@ -441,41 +441,27 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
         model=config.SONNET_MODEL,
         max_tokens=600,
         system=(
-            "You write Google Image search queries that find FINISHED SOCIAL MEDIA POST DESIGNS "
-            "— the actual square/portrait graphics a brand posts on Instagram or LinkedIn.\n\n"
-            "CRITICAL: We want FINISHED POSTS, not:\n"
-            "  ✗ Font specimen sheets or typeface showcases\n"
-            "  ✗ Logo design or brand identity work\n"
-            "  ✗ Website or app UI screenshots\n"
-            "  ✗ Design articles or tutorials\n"
-            "  ✗ Template marketplace listings\n"
-            "  ✗ Typography posters\n\n"
-            "We want:\n"
-            "  ✓ Instagram post designs with headline + image + brand name\n"
-            "  ✓ Social media graphics showing a product or concept\n"
-            "  ✓ Agency-made brand campaign posts\n"
-            "  ✓ Square or portrait format marketing creatives\n\n"
-            "GOOD QUERY PATTERNS:\n"
-            "  site:behance.net social media posts campaign brand {industry} 2025\n"
-            "  site:dribbble.com instagram post design brand {mood} layout\n"
-            "  site:pinterest.com instagram post graphic design brand campaign minimal\n\n"
-            "ALWAYS include 'social media post' OR 'instagram post' OR 'brand campaign post' in each query.\n"
-            "NEVER use just typography or font terms without 'social media post' context.\n"
-            "Use site: filters for at least 2 of the 3 queries.\n\n"
-            "Return EXACTLY 3 queries, one per line. No numbering, no quotes, no explanation."
+            "You are a creative director helping a social media designer find layout inspiration.\n\n"
+            "The designer is looking for finished social media post designs they can study and replicate "
+            "— real brand posts, agency campaign graphics, editorial Instagram posts. "
+            "Not fonts, not logos, not UI, not articles.\n\n"
+            "You will be shown the designer's taste profile and context. "
+            "Write 3 Google Image search queries that would find posts matching their aesthetic. "
+            "Think like a designer who knows exactly what they're after — use specific visual language "
+            "(mood, composition, color temperature, layout style) not generic terms.\n\n"
+            "Use site: filters to target Behance, Dribbble, or Pinterest for at least 2 queries.\n"
+            "Return EXACTLY 3 queries, one per line. No numbering, no explanation."
         ),
         messages=[{
             "role": "user",
             "content": (
-                f"{'CLIENT MODE: ' + client if client and client != 'ALL' else 'GLOBAL MODE (personal taste only)'}\n"
-                f"Industry: {industry}\n"
-                f"Designer taste (use for mood/color/composition direction, NOT font terms):\n{taste_text}\n"
+                f"Context: {'designing for client ' + client if client and client != 'ALL' else 'exploring personal taste'}\n"
+                f"Industry: {industry}\n\n"
+                f"My taste profile:\n{taste_text if taste_text else 'No taste data yet — find a variety of high-quality editorial and minimal brand post styles'}\n\n"
                 f"{avoid_hint}\n"
                 f"{exclude_hint}\n"
                 f"{focus_text}\n\n"
-                f"Write 3 image search queries to find FINISHED SOCIAL MEDIA POST DESIGNS. "
-                f"Each query MUST target actual posts (Instagram/brand campaign graphics), not fonts or logos. "
-                f"Each from a different source (Behance, Dribbble/Pinterest, open web). "
+                f"What 3 image searches would find social media post designs matching this aesthetic? "
                 f"Prioritize 2024-2026 work."
             ),
         }],
@@ -668,34 +654,28 @@ async def scout_search(
         for i, img in enumerate(all_images[:25])
     )
 
-    # Claude picks the best 15 — showing more so user can teach the system their taste
+    # Claude curates — acts as art director, picks what matches the taste
     _ai = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     response = _ai.messages.create(
         model=config.SONNET_MODEL,
         max_tokens=2000,
         system=(
-            "You are a senior art director curating SOCIAL MEDIA POST designs for inspiration.\n"
-            "You are looking for FINISHED POSTS — the kind a brand actually publishes on Instagram or LinkedIn.\n\n"
-            "INCLUDE: brand campaign posts, product posts, editorial graphics, lifestyle posts, "
-            "announcement posts — anything that looks like a real published social media graphic.\n\n"
-            "EXCLUDE (skip these entirely):\n"
-            "  - Font specimen sheets or typeface showcases (stacked words showing font weights)\n"
-            "  - Logo design or brand identity work\n"
-            "  - Website screenshots or UI/app mockups\n"
-            "  - Design tutorials or how-to guides\n"
-            "  - Template marketplace previews\n"
-            "  - YouTube thumbnails or video covers\n\n"
-            "Prefer images from pinterest.com, behance.net, dribbble.com.\n"
+            "You are a creative director curating design inspiration for a social media designer.\n\n"
+            "Look at the image titles and sources. Pick the ones that look like actual brand posts "
+            "or campaign graphics a designer would want to study for layout ideas — "
+            "things like brand Instagram posts, editorial campaign graphics, product announcement posts.\n\n"
+            "Skip anything that is clearly not a finished post: font specimens, logo sheets, "
+            "UI mockups, tutorials, or template previews. Use your judgment — "
+            "you know good social media design when you see it.\n\n"
             "Return ONLY valid JSON."
         ),
         messages=[{
             "role": "user",
-            "content": f"""My taste profile (recent preferences weighted higher):
-{taste_text}
+            "content": f"""My taste profile:
+{taste_text if taste_text else "No specific taste yet — curate a variety of strong editorial and brand post styles"}
 
-Here are images found via search. I need SOCIAL MEDIA POST designs only.
-Pick up to 15 that are actual finished social media posts (not fonts, not logos, not UI).
-Include a range of layouts and styles so I can react and refine taste.
+Here are image search results. Pick up to 15 that match my aesthetic and look like
+finished social media posts worth studying for layout inspiration.
 
 IMAGES FOUND:
 {images_summary}
@@ -705,13 +685,12 @@ Return JSON array:
   {{
     "index": <number from the list above>,
     "name": "Short name 5 words max",
-    "description": "Layout, composition, mood — what the post actually looks like",
-    "why_relevant": "Why this is useful as social media post inspiration"
+    "description": "What the post looks like — layout, mood, composition, colors",
+    "why_relevant": "Why this fits my taste or would be interesting to explore"
   }},
   ...
 ]
 
-SKIP anything that looks like a font showcase, logo, UI screenshot, or tutorial.
 Return ONLY the JSON array."""
         }],
     )
