@@ -464,12 +464,13 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
         messages=[{
             "role": "user",
             "content": (
+                f"{'SPECIFIC REQUEST (prioritise this): ' + user_focus if user_focus else ''}\n"
                 f"Taste profile: {taste_text if taste_text else 'high quality editorial brand design'}\n"
                 f"Industry context: {industry}\n"
                 f"{rejection_hint}\n"
-                f"{focus_text}\n"
-                f"Give me visual style keywords for this aesthetic. "
-                f"{'Avoid keywords related to: ' + rejection_hint if rejection_hint else ''}"
+                f"Give me visual style keywords. "
+                f"{'The specific request above should dominate the keywords.' if user_focus else ''} "
+                f"{'Avoid anything related to: ' + rejection_hint if rejection_hint else ''}"
             ),
         }],
     )
