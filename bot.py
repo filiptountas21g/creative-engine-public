@@ -357,7 +357,9 @@ TOOLS = [
         "description": (
             "Replace the hero image in the last post while keeping all design decisions (font, colors, layout, text). "
             "Searches for a new stock photo or generates a new AI image using the same concept. "
-            "Use when user says 'replace the photo', 'use a stock image', 'change the picture', etc."
+            "Use when user says 'replace the photo', 'use a stock image', 'change the picture', etc.\n"
+            "Use background_style when user wants an AI-generated background (gradient, abstract, texture) — "
+            "e.g. 'orange gradient background', 'dark abstract background', 'warm amber texture'."
         ),
         "input_schema": {
             "type": "object",
@@ -366,6 +368,15 @@ TOOLS = [
                     "type": "string",
                     "enum": ["auto", "stock", "ai"],
                     "description": "Image source preference. 'stock' = stock photos only, 'ai' = AI-generated only, 'auto' = try stock first then AI. Use 'stock' when user asks for stock/real photos.",
+                },
+                "background_style": {
+                    "type": "string",
+                    "description": (
+                        "Custom description for AI background generation. Use when the user wants a specific "
+                        "background style like 'warm orange gradient', 'deep blue abstract', 'dark smoky texture', "
+                        "'amber glow', etc. This overrides the concept and forces AI generation with this exact style. "
+                        "Example: 'rich orange gradient with warm glow, abstract, no text'."
+                    ),
                 },
             },
             "required": [],
@@ -626,6 +637,7 @@ Rules:
   Reference: Red=#DC2626, Orange=#EA580C, Amber=#D97706, Yellow=#EAB308, Lime=#65A30D, Green=#16A34A, Emerald=#059669, Teal=#0D9488, Cyan=#0891B2, Sky=#0284C7, Blue=#2563EB, Indigo=#4F46E5, Violet=#7C3AED, Purple=#9333EA, Fuchsia=#C026D3, Pink=#DB2777, Rose=#E11D48, White=#FFFFFF, Black=#000000, Gray=#6B7280, Beige=#F5F0E8, Navy=#1E3A5F, Burgundy=#800020, Gold=#FFD700, Coral=#FF6B6B, Turquoise=#40E0D0, Peach=#FFCBA4, Lavender=#E6E6FA, Mint=#98FB98, Cream=#FFFDD0, Charcoal=#36454F
 - STOCK PHOTOS: When user asks to "use stock photos", "use real photos", "no AI images", "use actual photos", or anything similar → set image_source="stock" on generate_post. This is CRITICAL. Default is "auto".
 - LANDSCAPE FORMAT: When user asks for "landscape", "16:9", "widescreen", "horizontal" or "can you make it landscape" → set format="landscape" on generate_post. Default is "square".
+- AI BACKGROUND: When user asks for an AI-generated gradient/abstract/textured background (e.g. "orange gradient background made with AI", "dark abstract bg", "warm amber texture") → call replace_image with background_style set to a detailed description. Do NOT use CSS colors for this — the user explicitly wants AI-generated visuals.
 - INSPIRATION POSTS: When user sends an image and says "make a post like this", "similar to this one", "based on this" → set use_last_inspiration=true on generate_post. This makes the template replicate the layout of THAT specific image. Do NOT set this for normal posts.
 - CLIENT RULES: When user says "never use X for client", "always use Y for client", "client should not have Z" → call save_client_rule to permanently store this. Do this IN ADDITION to any other action (like generating a new post). Example: "never use orange for Georgoulis" → save_client_rule + generate_post.
 - DESIGN SCOUT: When user asks to find fresh designs, inspiration, or specific styles, call scout_designs. Always set the focus field from what they say — e.g. "find me dark luxury posts" → focus="dark luxury editorial", "look for minimal health brand posts" → focus="minimal health brand", "something with bold typography" → focus="bold typography". If there are pending scout results, watch for the user's approval reply.
@@ -1226,9 +1238,24 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
 
     try:
         image_source = params.get("image_source", "auto")
+        background_style = params.get("background_style")
         pipeline_input = PipelineInput(client=client_name, brief=concept.object)
         brain_ctx = await brain_read(pipeline_input, brain)
-        new_image = await generate_image(concept, brain_ctx, image_source=image_source)
+
+        if background_style:
+            # User wants a custom AI-generated background — build a minimal concept from the style description
+            from dataclasses import replace as dc_replace
+            bg_concept = dc_replace(
+                concept,
+                object=background_style,
+                why="Background visual for the post",
+                composition_note="Abstract, no text, no people, suitable as a full-bleed background",
+                what_to_avoid="text, logos, faces, complex objects",
+            )
+            await status_msg.edit_text(f"🎨 Generating AI background: {background_style[:60]}...")
+            new_image = await generate_image(bg_concept, brain_ctx, image_source="ai")
+        else:
+            new_image = await generate_image(concept, brain_ctx, image_source=image_source)
         await status_msg.edit_text(f"🖼️ Got new image ({new_image.model_used}), re-rendering...")
 
         extra_images = post_data.get("extra_images")
@@ -1238,11 +1265,19 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
             extra_images=extra_images,
         )
 
-        result_text = (
-            f"✅ Image replaced for {client_name}\n\n"
-            f"🖼️ New image: {new_image.model_used}\n"
-            f"📐 Layout unchanged"
-        )
+        if background_style:
+            result_text = (
+                f"✅ Background replaced for {client_name}\n\n"
+                f"🎨 Style: {background_style[:80]}\n"
+                f"🤖 Model: {new_image.model_used}\n"
+                f"📐 Layout unchanged"
+            )
+        else:
+            result_text = (
+                f"✅ Image replaced for {client_name}\n\n"
+                f"🖼️ New image: {new_image.model_used}\n"
+                f"📐 Layout unchanged"
+            )
 
         img_path = Path(render_result.final_image_path)
         await msg.reply_photo(photo=open(img_path, "rb"), caption=result_text[:1024], read_timeout=60, write_timeout=60)
