@@ -151,10 +151,22 @@ async def run_pipeline(
         anti_repetition_ctx = ""
         if forced_layout_blueprint:
             anti_repetition_ctx = forced_layout_blueprint
-        elif staleness.get("avoid_instructions"):
-            anti_repetition_ctx += staleness["avoid_instructions"] + "\n\n"
-        if not forced_layout_blueprint and scout_hint:
-            anti_repetition_ctx += scout_hint
+        else:
+            # Always pass recent layout history — don't wait for staleness threshold
+            recent_tags = brain.query(topic="layout_tags", client=input.client, limit=4)
+            if not recent_tags:
+                recent_tags = brain.query(topic="layout_tags", limit=4)
+            if recent_tags:
+                recent_desc = ", ".join(
+                    t.get("summary", "").split(" / ")[2] if " / " in t.get("summary","") else t.get("summary","")
+                    for t in recent_tags[:3] if t.get("summary")
+                )
+                if recent_desc:
+                    anti_repetition_ctx += f"RECENT LAYOUTS ALREADY USED (do NOT repeat these): {recent_desc}. Make something structurally different.\n\n"
+            if staleness.get("avoid_instructions"):
+                anti_repetition_ctx += staleness["avoid_instructions"] + "\n\n"
+            if scout_hint:
+                anti_repetition_ctx += scout_hint
 
         dynamic_html = await generate_dynamic_template(
             decisions, brain, has_logo=has_logo, forced_reference=forced_reference,

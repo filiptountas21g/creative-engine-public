@@ -165,10 +165,21 @@ Never use divs or colored boxes as image placeholders."""
     uniqueness_instruction = ""
     if not forced_reference:
         uniqueness_instruction = """
-Make this layout UNIQUE. Don't default to basic split or centered layouts every time.
-Consider: asymmetric compositions, overlapping elements, creative image cropping,
-bold geometric shapes, editorial magazine layouts, minimal with dramatic whitespace,
-text integrated into the image area, etc."""
+LAYOUT CREATIVITY — THIS IS CRITICAL:
+The default "split" layout (text left, image right) and "centered text over image" are BANNED unless
+the anti-repetition context explicitly allows them. Every post must feel like a different designer made it.
+
+Pick ONE of these structural approaches and commit to it fully:
+- FULL BLEED: image covers entire 1080x1080, bold text overlaid with contrast treatment
+- EDITORIAL GRID: asymmetric columns (30/70, 20/80), text at unexpected weight
+- TEXT DOMINANT: large typographic statement fills most of the canvas, tiny image accent
+- LAYERED: elements overlap — text sits partially on image, partially on color block
+- DIAGONAL / ANGLED: content blocks at angles, not aligned to a grid
+- BOTTOM HEAVY: image top 60%, all text stacked at bottom on solid color band
+- COLLAGE: multiple image fragments arranged as a composition
+- OVERSIZED HEADLINE: one word or phrase enormous, fills 60%+ of canvas
+
+Do NOT produce a 50/50 vertical split with text on the left."""
 
     user_prompt = f"""Create an HTML template for this post.
 
