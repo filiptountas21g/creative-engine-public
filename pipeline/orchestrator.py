@@ -148,6 +148,23 @@ async def run_pipeline(
         asset_manifest = None
         manifest_text = None
         if forced_reference and forced_reference.get("_image_b64"):
+            # Auto-detect landscape from reference image dimensions
+            try:
+                import base64 as _b64
+                from PIL import Image as _PILImage
+                import io as _io
+                ref_bytes = _b64.b64decode(forced_reference["_image_b64"])
+                ref_img = _PILImage.open(_io.BytesIO(ref_bytes))
+                ref_w, ref_h = ref_img.size
+                ref_ratio = ref_w / ref_h
+                if ref_ratio > 1.3:  # wider than 1.3:1 → landscape
+                    input.format = "landscape"
+                    logger.info(f"Reference is landscape ({ref_w}x{ref_h}, ratio {ref_ratio:.2f}) — auto-switching to landscape format")
+                    await _notify("decompose", f"Detected landscape reference ({ref_w}×{ref_h})")
+                ref_img.close()
+            except Exception as e:
+                logger.warning(f"Could not detect reference aspect ratio: {e}")
+
             await _notify("decompose", "Decomposing reference into elements...")
             try:
                 asset_manifest = await decompose_reference(forced_reference["_image_b64"])
