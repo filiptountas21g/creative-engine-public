@@ -482,22 +482,15 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
     style_keywords = " ".join(style_words.split()[:6])
     logger.info(f"Scout style words: {style_keywords}")
 
-    # Use industry but NOT client name — too specific, returns 0 results
-    base = industry if industry and industry != "business and design" else ""
-    base_query = f"{base} brand campaign post".strip()
+    # NOTE: Serper image search ignores site: filters entirely.
+    # Use "behance" / "dribbble" as keywords — whitelist filter keeps only their CDN images.
+    base = industry if industry and industry != "business and design" else "brand"
 
     queries = [
-        (f"site:behance.net {base_query} {style_keywords} 2025", "Behance"),
-        (f"site:behance.net {base_query} {style_keywords} 2024", "Behance 2024"),
-        (f"site:dribbble.com {base_query} {style_keywords}", "Dribbble"),
+        (f"behance {base} social media campaign design {style_keywords} 2025", "Behance 2025"),
+        (f"behance {base} social media campaign design {style_keywords} 2024", "Behance 2024"),
+        (f"dribbble {base} social media post design {style_keywords}", "Dribbble"),
     ]
-
-    if avoid_hint:
-        # Add a 4th query that explicitly goes for something different
-        queries.append((
-            f"site:behance.net brand social media creative {style_words} 2024 2025",
-            "Experimental",
-        ))
 
     return queries
 
