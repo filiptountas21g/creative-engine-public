@@ -555,8 +555,7 @@ async def _serper_image_search(query: str, num: int = 10) -> list[dict]:
 
 
 def _is_good_design_image(item: dict, seen_image_urls: set) -> bool:
-    """Filter: keep only real design images from quality sources."""
-    import re
+    """Filter: only accept images from Behance and Dribbble."""
     domain = item.get("domain", "")
     image_url = item.get("imageUrl", "")
     w = item.get("imageWidth", 0)
@@ -570,8 +569,9 @@ def _is_good_design_image(item: dict, seen_image_urls: set) -> bool:
     if image_url in seen_image_urls:
         return False
 
-    # Skip hard-blocked domains
-    if any(blocked in domain for blocked in HARD_BLOCKED_DOMAINS):
+    # WHITELIST — only accept from Behance and Dribbble
+    ALLOWED_DOMAINS = {"behance.net", "dribbble.com", "mir-cdn.behance.net", "mir-s3-cdn-cf.behance.net", "cdn.dribbble.com"}
+    if not any(allowed in domain for allowed in ALLOWED_DOMAINS):
         return False
 
     # Skip tiny images (thumbnails, icons)
@@ -580,7 +580,7 @@ def _is_good_design_image(item: dict, seen_image_urls: set) -> bool:
 
     # Skip obvious non-design images
     lower_url = image_url.lower()
-    if any(ext in lower_url for ext in [".gif", ".svg", ".ico", ".webp?w=50"]):
+    if any(ext in lower_url for ext in [".gif", ".svg", ".ico"]):
         return False
 
     return True
