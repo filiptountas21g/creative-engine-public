@@ -652,100 +652,23 @@ async def scout_search(
         logger.warning("Serper returned no usable design images")
         return {"items": [], "raw_images": [], "client": client, "industry": industry, "staleness": staleness}
 
-    logger.info(f"Scout: {len(all_images)} unique images after filtering")
+    logger.info(f"Scout: {len(all_images)} unique images after filtering — sending directly (no curation)")
 
-    # Get taste for Claude curation
-    taste_text = _get_taste_description(brain)
-
-    # Build summary of what we found for Claude to curate
-    images_summary = "\n".join(
-        f'{i+1}. [{img.get("domain","?")}] {img.get("title","")[:80]} | {img.get("link","")[:80]}'
-        for i, img in enumerate(all_images[:25])
-    )
-
-    # Claude curates — acts as art director, picks what matches the taste
-    _ai = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    response = _ai.messages.create(
-        model=config.SONNET_MODEL,
-        max_tokens=2000,
-        system=(
-            "You are a creative director curating design inspiration for a social media designer.\n\n"
-            "Look at the image titles and sources. Pick the ones that look like actual brand posts "
-            "or campaign graphics a designer would want to study for layout ideas — "
-            "things like brand Instagram posts, editorial campaign graphics, product announcement posts.\n\n"
-            "Skip anything that is clearly not a finished post: font specimens, logo sheets, "
-            "UI mockups, tutorials, or template previews. Use your judgment — "
-            "you know good social media design when you see it.\n\n"
-            "Return ONLY valid JSON."
-        ),
-        messages=[{
-            "role": "user",
-            "content": f"""My taste profile:
-{taste_text if taste_text else "No specific taste yet — curate a variety of strong editorial and brand post styles"}
-
-Here are image search results. Pick up to 15 that match my aesthetic and look like
-finished social media posts worth studying for layout inspiration.
-
-IMAGES FOUND:
-{images_summary}
-
-Return JSON array:
-[
-  {{
-    "index": <number from the list above>,
-    "name": "Short name 5 words max",
-    "description": "What the post looks like — layout, mood, composition, colors",
-    "why_relevant": "Why this fits my taste or would be interesting to explore"
-  }},
-  ...
-]
-
-Return ONLY the JSON array."""
-        }],
-    )
-
-    raw_text = response.content[0].text.strip()
-    if raw_text.startswith("```"):
-        raw_text = raw_text.split("\n", 1)[1].rstrip("`").strip()
-
-    # Parse Claude's picks and map back to actual image data
+    # No Claude curation — results are already from Behance/Dribbble only (whitelist filtered).
+    # You are the curator — save what you like, reject what you don't.
     items = []
-    try:
-        picks = json.loads(raw_text)
-        if isinstance(picks, list):
-            for pick in picks:
-                idx = pick.get("index", 0) - 1  # Convert to 0-based
-                if 0 <= idx < len(all_images):
-                    img = all_images[idx]
-                    items.append({
-                        "index": len(items) + 1,
-                        "name": pick.get("name", img.get("title", "Design")[:40]),
-                        "description": pick.get("description", ""),
-                        "why_relevant": pick.get("why_relevant", ""),
-                        "url": img.get("link", ""),
-                        "image_url": img.get("imageUrl", ""),
-                        "thumbnail_url": img.get("thumbnailUrl", ""),
-                        "domain": img.get("domain", ""),
-                    })
-    except (json.JSONDecodeError, Exception) as e:
-        logger.warning(f"Claude curation parse failed: {e}, using raw images directly")
+    for i, img in enumerate(all_images[:15]):
+        items.append({
+            "index": i + 1,
+            "name": img.get("title", "Design")[:50],
+            "description": f"{img.get('domain', '?')}",
+            "url": img.get("link", ""),
+            "image_url": img.get("imageUrl", ""),
+            "thumbnail_url": img.get("thumbnailUrl", ""),
+            "domain": img.get("domain", ""),
+        })
 
-    # If curation returned nothing (Claude rejected all or parse error), show raw results
-    if not items:
-        logger.warning(f"Curation returned 0 items — falling back to top {min(15, len(all_images))} raw images")
-        for i, img in enumerate(all_images[:15]):
-            items.append({
-                "index": i + 1,
-                "name": img.get("title", "Design")[:40],
-                "description": f"From {img.get('domain', '?')}",
-                "why_relevant": "",
-                "url": img.get("link", ""),
-                "image_url": img.get("imageUrl", ""),
-                "thumbnail_url": img.get("thumbnailUrl", ""),
-                "domain": img.get("domain", ""),
-            })
-
-    logger.info(f"Scout search found {len(items)} items from Serper")
+    logger.info(f"Scout returning {len(items)} items from Behance/Dribbble")
 
     return {
         "items": items,
