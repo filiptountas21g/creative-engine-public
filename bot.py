@@ -830,9 +830,47 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         # ── INSPIRATION (default) ──
-        analysis = await analyze_inspiration(tmp_path, context=caption)
-
         client = image_intent.get("client") or _extract_client_from_caption(caption)
+
+        # Detect if user wants to GENERATE (not just share inspiration)
+        import re as _re
+        _generation_keywords = _re.compile(
+            r'\b(make|create|copy|recreate|clone|replicate|build|design|generate|κάνε|φτιάξε|δημιούργησε)\b',
+            _re.IGNORECASE,
+        )
+        wants_generation = bool(caption and _generation_keywords.search(caption))
+
+        # Save image bytes immediately — generation needs them
+        import base64
+        _last_analysis_by_user[user_id] = {}
+        try:
+            img_b64 = base64.b64encode(tmp_path.read_bytes()).decode("utf-8")
+            _last_analysis_by_user[user_id]["_image_b64"] = img_b64
+        except Exception:
+            pass
+
+        if wants_generation:
+            # FAST PATH: Skip analysis, go straight to generation
+            # The pipeline will decompose the image itself — no need for taste analysis
+            logger.info(f"[photo] Caption wants generation — skipping analysis, going straight to pipeline")
+            await status_msg.delete()
+
+            _persist_user_reference(user_id)
+            _add_to_history(user_id, "user", f"[sent reference image] {caption}")
+
+            request_text = (
+                f"[User sent a reference image and wants to generate a post based on it. "
+                f"The image is stored as the latest inspiration. "
+                f"The user's message: \"{caption}\"]\n\n"
+                f"Call generate_post with use_last_inspiration=true. "
+                f"Extract the client name and brief from the caption."
+            )
+            _add_to_history(user_id, "user", request_text)
+            await _run_tool_use_loop(user_id, msg)
+            return
+
+        # STANDARD PATH: Analyze and show breakdown (user is just sharing inspiration)
+        analysis = await analyze_inspiration(tmp_path, context=caption)
 
         brain.store(
             topic="taste_reference",
@@ -852,16 +890,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if client:
             analysis_text = f"🏷️ Tagged for: <b>{client}</b>\n\n" + analysis_text
 
-        # Send in chunks if too long for Telegram (4096 char limit)
-        # Save analysis + image bytes BEFORE trying to send — so "make like this" works even if send fails
-        import base64
-        _last_analysis_by_user[user_id] = analysis
-        try:
-            img_b64 = base64.b64encode(tmp_path.read_bytes()).decode("utf-8")
-            _last_analysis_by_user[user_id]["_image_b64"] = img_b64
-        except Exception:
-            pass
-        # Persist to DB so it survives restarts
+        _last_analysis_by_user[user_id].update(analysis)
         _persist_user_reference(user_id)
         _remember(user_id, "analysis", analysis, label=analysis.get("summary", caption or "inspiration image")[:60])
         _add_to_history(user_id, "user", f"[sent inspiration photo] {caption}")
@@ -878,8 +907,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     reply = await msg.reply_text(chunk, parse_mode="HTML")
         except Exception as html_err:
             logger.warning(f"HTML parse failed, sending as plain text: {html_err}")
-            # Strip HTML tags and send as plain text
-            import re as _re
             plain = _re.sub(r'<[^>]+>', '', analysis_text)
             if len(plain) <= 4000:
                 reply = await msg.reply_text(plain)
@@ -891,7 +918,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if reply:
             _analysis_by_msg[reply.message_id] = analysis
 
-        # If there's a caption, let Claude decide what to do with it
+        # If there's a caption that isn't a generation command, let Claude decide
         if caption:
             logger.info(f"Photo has caption — letting Claude decide: '{caption[:60]}'")
             request_text = (
