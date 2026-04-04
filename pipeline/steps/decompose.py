@@ -44,7 +44,7 @@ DECOMPOSE_SCHEMA = """{
   "canvas": {
     "aspect_ratio": "e.g. 1:1, 16:9, 4:5",
     "background_type": "solid | gradient | photo | complex",
-    "background_css": "CSS value if achievable (e.g. linear-gradient(...) or #hex), null if photo/complex"
+    "background_note": "Description of the background for reference only"
   },
   "elements": [
     {
@@ -120,7 +120,14 @@ CRITICAL RULES:
 3. For photos/portraits, write a detailed AI generation prompt that would reproduce
    the subject, lighting, angle, and mood.
 
-4. For backgrounds (gradients, solid colors), give the exact CSS value.
+4. BACKGROUNDS — this is CRITICAL:
+   - SOLID flat color (pure black, white, navy): sourcing="css", css_snippet="background: #hex"
+   - GRADIENT, glow, texture, abstract, atmospheric, or ANY visual background:
+     sourcing="ai_photo", photo_prompt="detailed description of the gradient/texture/glow"
+     The AI will generate this as an image. NEVER use CSS linear-gradient().
+   - Photo background: sourcing="ai_photo" with photo_prompt describing the scene
+   A gradient background element must be type="background", sourcing="ai_photo",
+   z_index=0, with a photo_prompt like "warm orange gradient with golden glow, soft abstract, no text"
 
 5. Positions are PERCENTAGES of the canvas. Be precise — "roughly center" is not
    acceptable. "x: 45%, y: 8%, width: 30%, height: 12%" IS.
@@ -192,10 +199,13 @@ def format_manifest_for_template(manifest: dict) -> str:
 
     canvas = manifest.get("canvas", {})
     lines.append(f"\nCanvas: {canvas.get('aspect_ratio', '1:1')}")
-    if canvas.get("background_css"):
-        lines.append(f"Background CSS: {canvas['background_css']}")
-    elif canvas.get("background_type"):
-        lines.append(f"Background: {canvas['background_type']} (use {{{{IMAGE_1}}}} for photo/complex backgrounds)")
+    bg_type = canvas.get("background_type", "solid")
+    if bg_type in ("gradient", "photo", "complex"):
+        lines.append(f"Background: {bg_type} — will be generated as {{{{IMAGE_1}}}} (AI-generated, NOT CSS)")
+    elif bg_type == "solid":
+        lines.append(f"Background: solid color — use var(--color-bg)")
+    if canvas.get("background_note"):
+        lines.append(f"Background description: {canvas['background_note']}")
 
     # Color palette
     palette = manifest.get("color_palette", [])
