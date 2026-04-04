@@ -10,7 +10,7 @@ import logging
 import time
 
 from brain.client import Brain
-from pipeline.types import PipelineInput, PipelineResult
+from pipeline.types import PipelineInput, PipelineResult, CreativeDecisions
 from pipeline.steps.research import research
 from pipeline.steps.brain_read import brain_read
 from pipeline.steps.concept import creative_concept
@@ -113,58 +113,21 @@ async def run_pipeline(
             result.concept = concept
             await _notify("concept", f"Concept: {concept.object}")
 
-        # Step 4: Copy (Sonnet)
-        await _notify("copy", "Sonnet is writing headlines...")
-        copy = await write_copy(input, concept, brain_ctx)
-        result.copy = copy
-        await _notify("copy", f"{len(copy.headlines)} headlines ready")
-
-        # Step 5: Creative Decisions (Opus) — done before image gen so we know the concept
-        # Fetch client-specific preferences (liked colors, fonts, rules)
-        client_prefs = get_client_preferences(brain, input.client)
-        if client_prefs:
-            await _notify("decisions", f"Found preferences for {input.client}")
-
-        # Inject scout font names into prefs if available
-        from pipeline.steps.font_pool import get_scout_font_names
-        scout_fonts = get_scout_font_names(brain)
-        if scout_fonts:
-            if not client_prefs:
-                client_prefs = {}
-            client_prefs["scout_fonts"] = scout_fonts
-
-        # Step 5a: Creative Decisions (Opus)
-        await _notify("decisions", "Opus is picking headline, font, colors...")
-        decisions = await creative_decisions(input, concept, copy, None, brain_ctx, previous_decisions, client_prefs)
-        result.decisions = decisions
-        await _notify("decisions", (
-            f"Template: {decisions.template}, "
-            f"Font: {decisions.font_headline} {decisions.font_headline_weight}"
-        ))
-
         # Fetch client logo if available
         logo_b64 = _get_client_logo(brain, input.client)
         has_logo = logo_b64 is not None
         if has_logo:
             await _notify("template", f"Found logo for {input.client}")
 
-        # Anti-repetition: check if recent layouts are getting stale
-        staleness = detect_staleness(brain, client=input.client)
-        scout_hint = None
-        if staleness.get("is_stale") and not forced_reference:
-            await _notify("scout", "Layouts getting repetitive — checking for fresh ideas...")
-            scout_hint = get_scout_inspiration(brain, input.client, staleness)
-            if not scout_hint and staleness.get("should_scout"):
-                await _notify("scout", "Searching for fresh design inspiration...")
-                scout_result = await run_design_scout_auto(brain, client=input.client, staleness=staleness)
-                if scout_result.get("stored"):
-                    scout_hint = get_scout_inspiration(brain, input.client, staleness)
-                    await _notify("scout", f"Found {scout_result.get('layouts_found', 0)} fresh layouts")
-
-        # Step 5b: Decompose reference image (if copying)
         asset_manifest = None
         manifest_text = None
-        if forced_reference and forced_reference.get("_image_b64"):
+        scout_hint = None
+        staleness = {}
+
+        if is_copy_mode:
+            # ── COPY MODE: Decompose → derive decisions from manifest ──
+            # Skip: concept (already done), staleness, scout — not relevant for copying
+
             # Auto-detect landscape from reference image dimensions
             try:
                 import base64 as _b64
@@ -174,14 +137,15 @@ async def run_pipeline(
                 ref_img = _PILImage.open(_io.BytesIO(ref_bytes))
                 ref_w, ref_h = ref_img.size
                 ref_ratio = ref_w / ref_h
-                if ref_ratio > 1.3:  # wider than 1.3:1 → landscape
+                if ref_ratio > 1.3:
                     input.format = "landscape"
-                    logger.info(f"Reference is landscape ({ref_w}x{ref_h}, ratio {ref_ratio:.2f}) — auto-switching to landscape format")
+                    logger.info(f"Reference is landscape ({ref_w}x{ref_h}, ratio {ref_ratio:.2f})")
                     await _notify("decompose", f"Detected landscape reference ({ref_w}×{ref_h})")
                 ref_img.close()
             except Exception as e:
                 logger.warning(f"Could not detect reference aspect ratio: {e}")
 
+            # Step A: Decompose reference
             await _notify("decompose", "Decomposing reference into elements...")
             try:
                 asset_manifest = await decompose_reference(forced_reference["_image_b64"])
@@ -192,10 +156,109 @@ async def run_pipeline(
                     n_photos = sum(1 for e in asset_manifest["elements"] if e.get("sourcing") in ("ai_photo", "stock_photo"))
                     await _notify("decompose", f"Found {n_elems} elements ({n_svgs} SVGs, {n_photos} photos)")
                 else:
-                    logger.warning("Decompose returned no elements — falling back to standard MODE A")
+                    logger.warning("Decompose returned no elements")
             except Exception as e:
-                logger.error(f"Decompose failed (non-critical): {e}")
+                logger.error(f"Decompose failed: {e}")
                 await _notify("decompose", "Decompose failed — using standard replication")
+
+            # Step B: Write copy (still need headlines)
+            await _notify("copy", "Writing headlines...")
+            copy = await write_copy(input, concept, brain_ctx)
+            result.copy = copy
+
+            # Step C: Build decisions FROM the manifest — not from Opus's independent taste
+            manifest_fonts = asset_manifest.get("fonts", {}) if asset_manifest else {}
+            manifest_colors = asset_manifest.get("color_palette", []) if asset_manifest else []
+
+            # Extract font from manifest
+            primary_font = manifest_fonts.get("primary", {})
+            font_name = primary_font.get("google_fonts_suggestion", "Inter")
+            font_weight = int(primary_font.get("weight", "400").replace("bold", "700")) if primary_font.get("weight") else 400
+
+            # Extract colors from manifest
+            color_bg = "#1a1a2e"
+            color_text = "#ffffff"
+            color_accent = "#D97706"
+            color_subtext = "#cccccc"
+            for c in manifest_colors:
+                role = c.get("role", "")
+                hex_val = c.get("hex", "")
+                if not hex_val:
+                    continue
+                if "background" in role:
+                    color_bg = hex_val
+                elif "text" in role or "primary" in role:
+                    color_text = hex_val
+                elif "accent" in role or "secondary" in role:
+                    color_accent = hex_val
+
+            decisions = CreativeDecisions(
+                headline=copy.headlines[0] if copy.headlines else input.brief,
+                headline_reason="From reference",
+                font_headline=font_name,
+                font_headline_weight=font_weight,
+                font_headline_size=42,  # Smaller — reference has elegant small text
+                font_headline_tracking="-0.01em",
+                font_headline_line_height=1.15,
+                font_headline_case="none",  # Reference uses sentence case, not uppercase
+                font_subtext=font_name,
+                font_subtext_weight=300,
+                font_subtext_size=16,
+                color_bg=color_bg,
+                color_text=color_text,
+                color_accent=color_accent,
+                color_subtext=color_subtext,
+                headline_margin_x=40,
+                headline_margin_y=40,
+                headline_max_width="45%",
+                image_padding=0,
+                template="full-bleed",
+                subtext=copy.subtext,
+                cta=copy.cta,
+            )
+            result.decisions = decisions
+            await _notify("decisions", f"Decisions from reference: font={font_name}, colors from manifest")
+            logger.info(f"Copy mode decisions: font={font_name} {font_weight}, bg={color_bg}, text={color_text}, accent={color_accent}")
+
+        else:
+            # ── NORMAL MODE: Standard creative pipeline ──
+            # Step 4: Copy (Sonnet)
+            await _notify("copy", "Sonnet is writing headlines...")
+            copy = await write_copy(input, concept, brain_ctx)
+            result.copy = copy
+            await _notify("copy", f"{len(copy.headlines)} headlines ready")
+
+            # Step 5: Creative Decisions (Opus)
+            client_prefs = get_client_preferences(brain, input.client)
+            if client_prefs:
+                await _notify("decisions", f"Found preferences for {input.client}")
+
+            from pipeline.steps.font_pool import get_scout_font_names
+            scout_fonts = get_scout_font_names(brain)
+            if scout_fonts:
+                if not client_prefs:
+                    client_prefs = {}
+                client_prefs["scout_fonts"] = scout_fonts
+
+            await _notify("decisions", "Opus is picking headline, font, colors...")
+            decisions = await creative_decisions(input, concept, copy, None, brain_ctx, previous_decisions, client_prefs)
+            result.decisions = decisions
+            await _notify("decisions", (
+                f"Template: {decisions.template}, "
+                f"Font: {decisions.font_headline} {decisions.font_headline_weight}"
+            ))
+
+            # Anti-repetition
+            staleness = detect_staleness(brain, client=input.client)
+            if staleness.get("is_stale") and not forced_reference:
+                await _notify("scout", "Layouts getting repetitive — checking for fresh ideas...")
+                scout_hint = get_scout_inspiration(brain, input.client, staleness)
+                if not scout_hint and staleness.get("should_scout"):
+                    await _notify("scout", "Searching for fresh design inspiration...")
+                    scout_result = await run_design_scout_auto(brain, client=input.client, staleness=staleness)
+                    if scout_result.get("stored"):
+                        scout_hint = get_scout_inspiration(brain, input.client, staleness)
+                        await _notify("scout", f"Found {scout_result.get('layouts_found', 0)} fresh layouts")
 
         # Step 6: Dynamic Template (Opus generates fresh layout from inspiration)
         if forced_reference:
