@@ -103,6 +103,7 @@ async def generate_dynamic_template(
     client: str = "ALL",
     anti_repetition: str | None = None,
     canvas_format: str = "square",
+    asset_manifest: str | None = None,
 ) -> str:
     """
     Generate a fresh HTML template based on an inspiration reference.
@@ -142,7 +143,31 @@ async def generate_dynamic_template(
 
     replication_instruction = ""
     if forced_reference:
-        replication_instruction = """
+        if asset_manifest:
+            # ENHANCED MODE A — element-level manifest available
+            replication_instruction = f"""
+THIS IS MODE A (ENHANCED) — ELEMENT-LEVEL REPLICATION.
+The user picked this specific design. You have a detailed ELEMENT MANIFEST below
+that breaks down every single element with positions, SVG code, and CSS snippets.
+
+YOUR JOB:
+1. Build each element from the manifest at its specified position
+2. For elements with svg_code: EMBED the SVG directly in the HTML — do not skip any icons
+3. For elements with css_snippet: use that exact CSS
+4. For photo slots: use the {{{{IMAGE_N}}}} placeholders as mapped in the manifest
+5. For text: use {{{{HEADLINE}}}}, {{{{SUBTEXT}}}}, {{{{CTA}}}}, {{{{CLIENT_NAME}}}} placeholders
+6. Match positions precisely — the manifest gives x/y/width/height as percentages
+7. Every decorative element matters — thin lines, dots, arrows, shapes. Build them ALL.
+
+ADAPT ONLY:
+- Replace colors with CSS variables (var(--color-bg), var(--color-text), etc.)
+- Replace fonts with var(--font-headline), var(--font-subtext)
+- Use the {{{{LOGO_PATH}}}} or {{{{CLIENT_NAME}}}} for branding
+
+{asset_manifest}"""
+        else:
+            # STANDARD MODE A — no manifest, just reference image + text description
+            replication_instruction = """
 THIS IS MODE A — REPLICATE, DO NOT REIMAGINE.
 The user picked this specific design. Your job is to reproduce the layout in HTML/CSS.
 

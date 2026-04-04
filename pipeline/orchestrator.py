@@ -26,6 +26,7 @@ from pipeline.steps.design_scout import (
     get_scout_inspiration, run_design_scout_auto,
     _get_taste_description, _get_client_brand_context,
 )
+from pipeline.steps.decompose import decompose_reference, format_manifest_for_template, get_photo_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,25 @@ async def run_pipeline(
                     scout_hint = get_scout_inspiration(brain, input.client, staleness)
                     await _notify("scout", f"Found {scout_result.get('layouts_found', 0)} fresh layouts")
 
+        # Step 5b: Decompose reference image (if copying)
+        asset_manifest = None
+        manifest_text = None
+        if forced_reference and forced_reference.get("_image_b64"):
+            await _notify("decompose", "Decomposing reference into elements...")
+            try:
+                asset_manifest = await decompose_reference(forced_reference["_image_b64"])
+                if asset_manifest.get("elements"):
+                    manifest_text = format_manifest_for_template(asset_manifest)
+                    n_elems = len(asset_manifest["elements"])
+                    n_svgs = sum(1 for e in asset_manifest["elements"] if e.get("svg_code"))
+                    n_photos = sum(1 for e in asset_manifest["elements"] if e.get("sourcing") in ("ai_photo", "stock_photo"))
+                    await _notify("decompose", f"Found {n_elems} elements ({n_svgs} SVGs, {n_photos} photos)")
+                else:
+                    logger.warning("Decompose returned no elements — falling back to standard MODE A")
+            except Exception as e:
+                logger.error(f"Decompose failed (non-critical): {e}")
+                await _notify("decompose", "Decompose failed — using standard replication")
+
         # Step 6: Dynamic Template (Opus generates fresh layout from inspiration)
         if forced_reference:
             await _notify("template", "Replicating the layout from your inspiration image...")
@@ -172,6 +192,7 @@ async def run_pipeline(
             decisions, brain, has_logo=has_logo, forced_reference=forced_reference,
             client=input.client, anti_repetition=anti_repetition_ctx or None,
             canvas_format=getattr(input, "format", "square"),
+            asset_manifest=manifest_text,
         )
         await _notify("template", "Layout ready")
 
@@ -190,31 +211,64 @@ async def run_pipeline(
         image = None
         extra_images = []
 
+        # Check if we have role-specific photo prompts from decomposition
+        photo_prompts = get_photo_prompts(asset_manifest) if asset_manifest and isinstance(asset_manifest, dict) and asset_manifest.get("elements") else []
+
         if has_any_image:
-            # Background image → AI only (gradients, abstracts look terrible as stock photos)
-            effective_source = "ai" if is_background_image else image_source
-            if is_background_image:
-                await _notify("image", "Generating AI background image...")
-                logger.info("IMAGE_1 is a background — forcing AI generation")
+            if photo_prompts:
+                # ENHANCED: use decomposed per-slot photo prompts
+                from dataclasses import replace as dc_replace
+                await _notify("image", f"Generating {len(photo_prompts)} role-specific images from manifest...")
+
+                for i, pp in enumerate(photo_prompts):
+                    slot = pp["slot"]
+                    src = "ai" if pp["is_background"] else image_source
+                    desc = pp["description"][:60]
+
+                    # Build a concept override with the specific photo prompt
+                    slot_concept = dc_replace(
+                        concept,
+                        object=pp["prompt"],
+                        why=pp["description"],
+                        composition_note="Match the reference photo style and framing",
+                        what_to_avoid="text, logos, watermarks",
+                    )
+                    await _notify("image", f"Image {slot}: {desc}...")
+                    slot_image = await generate_image(slot_concept, brain_ctx, image_source=src)
+
+                    if slot == 1:
+                        image = slot_image
+                        result.hero_image = image
+                    else:
+                        extra_images.append(slot_image)
+
+                await _notify("image", f"{len(photo_prompts)} images ready")
+
             else:
-                await _notify("image", "Generating hero image...")
+                # STANDARD: use concept-based image generation
+                effective_source = "ai" if is_background_image else image_source
+                if is_background_image:
+                    await _notify("image", "Generating AI background image...")
+                    logger.info("IMAGE_1 is a background — forcing AI generation")
+                else:
+                    await _notify("image", "Generating hero image...")
 
-            image = await generate_image(concept, brain_ctx, image_source=effective_source)
-            result.hero_image = image
-            await _notify("image", f"Image ready ({image.model_used})")
+                image = await generate_image(concept, brain_ctx, image_source=effective_source)
+                result.hero_image = image
+                await _notify("image", f"Image ready ({image.model_used})")
 
-            # Generate extra images for multi-slot templates
-            slot_nums = set()
-            for m in re.finditer(r'\{\{IMAGE_(\d+)\}\}', dynamic_html):
-                slot_nums.add(int(m.group(1)))
-            max_slot = max(slot_nums) if slot_nums else 1
-            if max_slot > 1:
-                extra_count = max_slot - 1
-                await _notify("image", f"Template needs {max_slot} images — generating {extra_count} more...")
-                extra_images = await generate_extra_images(
-                    concept, brain_ctx, count=extra_count, image_source=image_source,
-                )
-                await _notify("image", f"{len(extra_images)} extra images ready")
+                # Generate extra images for multi-slot templates
+                slot_nums = set()
+                for m in re.finditer(r'\{\{IMAGE_(\d+)\}\}', dynamic_html):
+                    slot_nums.add(int(m.group(1)))
+                max_slot = max(slot_nums) if slot_nums else 1
+                if max_slot > 1:
+                    extra_count = max_slot - 1
+                    await _notify("image", f"Template needs {max_slot} images — generating {extra_count} more...")
+                    extra_images = await generate_extra_images(
+                        concept, brain_ctx, count=extra_count, image_source=image_source,
+                    )
+                    await _notify("image", f"{len(extra_images)} extra images ready")
         else:
             logger.info("Template has no image slots — skipping image generation")
             await _notify("image", "Text-only layout — no image needed")

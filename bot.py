@@ -639,7 +639,7 @@ Rules:
 - STOCK PHOTOS: When user asks to "use stock photos", "use real photos", "no AI images", "use actual photos", or anything similar → set image_source="stock" on generate_post. This is CRITICAL. Default is "auto".
 - LANDSCAPE FORMAT: When user asks for "landscape", "16:9", "widescreen", "horizontal" or "can you make it landscape" → set format="landscape" on generate_post. Default is "square".
 - BACKGROUND CHANGES: Whenever the user asks to change the background to ANYTHING visual — gradient, warm tone, orange, dark, abstract, texture, glow, moody, cinematic, etc. — call replace_image with background_style describing the visual in detail (e.g. "rich warm orange gradient, smooth, no text, abstract glow"). NEVER use edit_post color_bg for gradients or atmospheric backgrounds. color_bg is ONLY for flat solid colors (pure black, white, navy). This applies even if the user does NOT say "AI" — the default is ALWAYS AI-generated backgrounds for any non-solid request.
-- INSPIRATION POSTS: When user sends an image and says "make a post like this", "similar to this one", "based on this" → set use_last_inspiration=true on generate_post. This makes the template replicate the layout of THAT specific image. Do NOT set this for normal posts.
+- INSPIRATION / COPY: When user sends an image and says "make a post like this", "similar to this one", "based on this", "copy this", "recreate this", "clone this design" → set use_last_inspiration=true on generate_post. The system will decompose the image element-by-element (icons, UI widgets, photos, shapes) and replicate it precisely. Do NOT set this for normal posts.
 - CLIENT RULES: When user says "never use X for client", "always use Y for client", "client should not have Z" → call save_client_rule to permanently store this. Do this IN ADDITION to any other action (like generating a new post). Example: "never use orange for Georgoulis" → save_client_rule + generate_post.
 - DESIGN SCOUT: When user asks to find fresh designs, inspiration, or specific styles, call scout_designs. Always set the focus field from what they say — e.g. "find me dark luxury posts" → focus="dark luxury editorial", "look for minimal health brand posts" → focus="minimal health brand", "something with bold typography" → focus="bold typography". If there are pending scout results, watch for the user's approval reply.
 - GENERATE FROM SCOUT: When user says "make a post like number 3" or "use layout 2 for LMW" while scout results are pending, call generate_from_scout with the item number, client and brief. This generates a post using that specific layout as a blueprint.
@@ -932,8 +932,8 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
             emojis = {
                 "research": "🔍", "brain": "🧠", "concept": "💡",
                 "copy": "📝", "image": "📸", "decisions": "🎯",
-                "template": "📐", "render": "🖨️", "critique": "👁️",
-                "fix": "🔧", "brain_write": "💾",
+                "decompose": "🔬", "template": "📐", "render": "🖨️",
+                "critique": "👁️", "fix": "🔧", "brain_write": "💾",
             }
             emoji = emojis.get(step, "⏳")
             await status_msg.edit_text(
@@ -1043,8 +1043,8 @@ async def _exec_generate_carousel(params: dict, user_id: int, msg) -> str:
             emojis = {
                 "research": "🔍", "brain": "🧠", "concept": "💡",
                 "copy": "📝", "image": "📸", "decisions": "🎯",
-                "template": "📐", "render": "🖨️", "critique": "👁️",
-                "fix": "🔧", "brain_write": "💾",
+                "decompose": "🔬", "template": "📐", "render": "🖨️",
+                "critique": "👁️", "fix": "🔧", "brain_write": "💾",
                 "carousel": "🎠",
             }
             emoji = emojis.get(step, "⏳")
