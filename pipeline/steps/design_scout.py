@@ -558,6 +558,7 @@ def _is_good_design_image(item: dict, seen_image_urls: set) -> bool:
     """Filter: only accept images from Behance and Dribbble."""
     domain = item.get("domain", "")
     image_url = item.get("imageUrl", "")
+    page_link = item.get("link", "")
     w = item.get("imageWidth", 0)
     h = item.get("imageHeight", 0)
 
@@ -569,9 +570,10 @@ def _is_good_design_image(item: dict, seen_image_urls: set) -> bool:
     if image_url in seen_image_urls:
         return False
 
-    # WHITELIST — only accept from Behance and Dribbble
-    ALLOWED_DOMAINS = {"behance.net", "dribbble.com", "mir-cdn.behance.net", "mir-s3-cdn-cf.behance.net", "cdn.dribbble.com"}
-    if not any(allowed in domain for allowed in ALLOWED_DOMAINS):
+    # WHITELIST — check domain, imageUrl, AND page link (Serper domain field is often empty)
+    ALLOWED = ("behance.net", "dribbble.com", "mir-cdn.behance.net", "mir-s3-cdn-cf.behance.net", "cdn.dribbble.com")
+    sources = f"{domain} {image_url} {page_link}".lower()
+    if not any(a in sources for a in ALLOWED):
         return False
 
     # Skip tiny images (thumbnails, icons)
@@ -579,8 +581,7 @@ def _is_good_design_image(item: dict, seen_image_urls: set) -> bool:
         return False
 
     # Skip obvious non-design images
-    lower_url = image_url.lower()
-    if any(ext in lower_url for ext in [".gif", ".svg", ".ico"]):
+    if any(ext in image_url.lower() for ext in [".gif", ".svg", ".ico"]):
         return False
 
     return True
