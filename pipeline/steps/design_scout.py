@@ -475,18 +475,21 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
         }],
     )
 
+    # Strip commas — they break site: filters in Google Image search
     style_words = response.content[0].text.strip().strip('"').strip("'")
-    logger.info(f"Scout style words: {style_words}")
+    style_words = style_words.replace(",", " ").replace("  ", " ").strip()
+    # Keep only first 4 keywords so queries don't get too long
+    style_keywords = " ".join(style_words.split()[:6])
+    logger.info(f"Scout style words: {style_keywords}")
 
-    # Build reliable query structures — Claude fills style, we control structure
-    # These patterns actually return brand work, not design tutorials
-    base = f"{industry} brand" if industry and industry != "business and design" else "brand"
-    client_hint = f"{client} brand" if client and client != "ALL" else base
+    # Use industry but NOT client name — too specific, returns 0 results
+    base = industry if industry and industry != "business and design" else ""
+    base_query = f"{base} brand campaign post".strip()
 
     queries = [
-        (f"site:behance.net {client_hint} campaign instagram post {style_words} 2025", "Behance campaigns"),
-        (f"site:dribbble.com {base} instagram post {style_words} layout", "Dribbble shots"),
-        (f"site:pinterest.com {base} campaign post {style_words} editorial", "Pinterest pins"),
+        (f"site:behance.net {base_query} {style_keywords} 2025", "Behance campaigns"),
+        (f"site:dribbble.com {base_query} {style_keywords}", "Dribbble shots"),
+        (f"site:pinterest.com {base_query} {style_keywords}", "Pinterest pins"),
     ]
 
     if avoid_hint:
@@ -513,6 +516,10 @@ HARD_BLOCKED_DOMAINS = {
     "canva.com", "envato.com", "freepik.com", "shutterstock.com",
     "stock.adobe.com", "creativemarket.com", "templatemonster.com",
     "vecteezy.com", "pngtree.com", "slidesgo.com", "placeit.net",
+    # Instagram only returns design tip/education accounts via Google Images — useless for brand work
+    "instagram.com", "cdninstagram.com",
+    # YouTube thumbnails are not design inspiration
+    "ytimg.com", "youtube.com",
 }
 
 
