@@ -83,7 +83,7 @@ async def extract_layout_tags(image_path: str) -> dict:
 
         client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model="claude-haiku-4-5",
+            model=config.SONNET_MODEL,
             max_tokens=256,
             messages=[{
                 "role": "user",
