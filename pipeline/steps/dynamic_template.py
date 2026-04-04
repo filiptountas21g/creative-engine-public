@@ -19,10 +19,20 @@ _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 TEMPLATE_SYSTEM = """You are an expert HTML/CSS designer building a social media post template.
 
 You will receive:
-1. A specific inspiration reference (composition, colors, typography, layers) from the user's taste library
+1. A reference image and/or description (composition, colors, typography, layers)
 2. The creative decisions (headline, font, colors, template style)
 
-Your job: create a UNIQUE HTML layout inspired by the reference but adapted for this specific post.
+TWO MODES — read the prompt carefully to know which one applies:
+
+MODE A — "REFERENCE TO REPLICATE": The user chose a specific design and wants it reproduced.
+  → COPY the layout structure AS CLOSELY AS POSSIBLE in HTML/CSS.
+  → Same grid, same element positions, same visual treatment, same proportions.
+  → Only substitute: brand colors, fonts, headline text, client logo.
+  → Do NOT get creative. Do NOT simplify. Reproduce what you see.
+
+MODE B — "INSPIRATION REFERENCE": Use it as creative direction, not a blueprint.
+  → Create a UNIQUE layout inspired by the mood, composition style, and aesthetic.
+  → You have creative freedom — vary the grid, text placement, decorative elements.
 
 The template MUST:
 1. Be exactly 1080x1080px
@@ -61,9 +71,8 @@ MULTIPLE IMAGES: If the layout needs multiple images (e.g. a grid of speakers, a
 CRITICAL RULES:
 - Every template MUST include at least <img src="{{IMAGE_1}}"> (or {{IMAGE_PATH}})
 - Do NOT use background-image CSS for images
-- Make each layout genuinely different — vary grid structures, text placement, image sizing, decorative elements
-- Use the inspiration as a starting point, not a copy
-- Be creative with layout: overlapping elements, asymmetric grids, text over image, sidebar layouts, diagonal cuts, etc.
+- In MODE B (inspiration): make each layout genuinely different — vary grid structures, text placement, image sizing, decorative elements. Be creative: overlapping elements, asymmetric grids, text over image, sidebar layouts, diagonal cuts.
+- In MODE A (replicate): match the reference precisely — do not simplify or genericise it.
 - NEVER write actual text content into the HTML. ONLY use placeholders: {{HEADLINE}}, {{SUBTEXT}}, {{CTA}}, {{CLIENT_NAME}}
   For example, write: <h1>{{HEADLINE}}</h1>
   NEVER write: <h1>Clear thinking. Elevated results.</h1>
@@ -131,22 +140,25 @@ async def generate_dynamic_template(
     replication_instruction = ""
     if forced_reference:
         replication_instruction = """
-IMPORTANT: The user specifically asked to REPLICATE this layout.
-Do NOT just use it as a starting point — CLOSELY MATCH the structure:
-- Same overall grid/composition (e.g. if it has a 4-column grid of photos, make a grid)
-- Same text positioning (top, bottom, left, right)
-- Same spacing proportions
-- Same visual hierarchy
-- Same use of shapes, badges, labels if present
-- Adapt the CONTENT (headline, colors, fonts) to the client's brand but keep the STRUCTURE identical
-- If the reference has rounded badges, use rounded badges. If it has a date section, include a date-like element.
-- CRITICAL FOR MULTI-PHOTO LAYOUTS: If the reference has multiple photos (e.g. speaker headshots in a row, a grid of portraits), you MUST use separate image placeholders for EACH photo slot:
-  <img src="{{IMAGE_1}}" alt="speaker 1">
-  <img src="{{IMAGE_2}}" alt="speaker 2">
-  <img src="{{IMAGE_3}}" alt="speaker 3">
-  <img src="{{IMAGE_4}}" alt="speaker 4">
-  Do NOT use colored divs or placeholder boxes. Use actual <img> tags with {{IMAGE_N}} placeholders.
-  The render engine will fill each slot with a different stock photo or AI-generated image."""
+THIS IS MODE A — REPLICATE, DO NOT REIMAGINE.
+The user picked this specific design. Your job is to reproduce the layout in HTML/CSS.
+
+REPRODUCE EXACTLY:
+- The grid structure and overall composition
+- Where the text sits (top-left, bottom, centered, overlapping image, etc.)
+- The spacing and proportions between elements
+- Any decorative elements: geometric shapes, lines, badges, overlays, gradient backgrounds
+- The visual hierarchy — what's dominant, what's secondary
+- The general color treatment (dark bg = dark bg, gradient = gradient, minimal = minimal)
+
+ONLY ADAPT:
+- Replace colors with the client's brand colors (using CSS variables)
+- Replace fonts with the chosen brand font
+- Use {{HEADLINE}}, {{SUBTEXT}}, {{CTA}} placeholders for text content
+- Use {{LOGO_PATH}} or {{CLIENT_NAME}} for the brand mark
+
+MULTI-PHOTO: If the reference has multiple photos, use {{IMAGE_1}}, {{IMAGE_2}}, etc. — one per slot.
+Never use divs or colored boxes as image placeholders."""
 
     uniqueness_instruction = ""
     if not forced_reference:
