@@ -171,6 +171,7 @@ async def run_pipeline(
         dynamic_html = await generate_dynamic_template(
             decisions, brain, has_logo=has_logo, forced_reference=forced_reference,
             client=input.client, anti_repetition=anti_repetition_ctx or None,
+            canvas_format=getattr(input, "format", "square"),
         )
         await _notify("template", "Layout ready")
 
@@ -224,7 +225,7 @@ async def run_pipeline(
 
         for iteration in range(1, MAX_REVISIONS + 2):  # 1 = first render, 2-3 = revisions
             await _notify("render", f"Rendering {'final ' if iteration > MAX_REVISIONS else ''}PNG{f' (revision {iteration - 1})' if iteration > 1 else ''}...")
-            render_result = await render(decisions, image, input.client, dynamic_html=current_html, logo_b64=logo_b64, extra_images=extra_images)
+            render_result = await render(decisions, image, input.client, dynamic_html=current_html, logo_b64=logo_b64, extra_images=extra_images, canvas_format=getattr(input, "format", "square"))
 
             # Skip critique on last allowed iteration or if we've done max revisions
             if iteration > MAX_REVISIONS:
@@ -439,11 +440,12 @@ async def _generate_carousel_slide(
         result.decisions = decisions
 
         # Render
+        _fmt = getattr(input, "format", "square")
         if locked_template_html:
-            render_result = await render(decisions, image, input.client, dynamic_html=locked_template_html, logo_b64=logo_b64)
+            render_result = await render(decisions, image, input.client, dynamic_html=locked_template_html, logo_b64=logo_b64, canvas_format=_fmt)
         else:
-            dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=logo_b64 is not None, client=input.client)
-            render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html, logo_b64=logo_b64)
+            dynamic_html = await generate_dynamic_template(decisions, brain, has_logo=logo_b64 is not None, client=input.client, canvas_format=_fmt)
+            render_result = await render(decisions, image, input.client, dynamic_html=dynamic_html, logo_b64=logo_b64, canvas_format=_fmt)
 
         result.image_path = render_result.final_image_path
         await _notify("render", f"Rendered slide {slide_num}")

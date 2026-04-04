@@ -242,6 +242,11 @@ TOOLS = [
                     "enum": ["auto", "stock", "ai"],
                     "description": "Image source preference. 'stock' = stock photos only, 'ai' = AI-generated only, 'auto' = try stock first then AI. Default: auto. Use 'stock' when user explicitly asks for stock/real photos.",
                 },
+                "format": {
+                    "type": "string",
+                    "enum": ["square", "landscape"],
+                    "description": "Canvas format. 'square' = 1080x1080 (default, Instagram/LinkedIn). 'landscape' = 1920x1080 (16:9, presentations, LinkedIn documents). Use 'landscape' when the user asks for landscape, 16:9, widescreen, or horizontal format.",
+                },
                 "use_last_inspiration": {
                     "type": "boolean",
                     "description": "Set to true ONLY when the user explicitly asks to make a post 'like this', 'similar to this', 'based on this' referring to an inspiration image they just sent. This forces the template to replicate that specific layout. Do NOT set this when generating a normal post.",
@@ -620,6 +625,7 @@ Rules:
 - COLOR CHANGES: When user says "replace X with Y", change ALL fields containing that color (color_bg, color_accent, color_text, color_subtext). Use DISTINCT, clearly different hex values — never subtle variations.
   Reference: Red=#DC2626, Orange=#EA580C, Amber=#D97706, Yellow=#EAB308, Lime=#65A30D, Green=#16A34A, Emerald=#059669, Teal=#0D9488, Cyan=#0891B2, Sky=#0284C7, Blue=#2563EB, Indigo=#4F46E5, Violet=#7C3AED, Purple=#9333EA, Fuchsia=#C026D3, Pink=#DB2777, Rose=#E11D48, White=#FFFFFF, Black=#000000, Gray=#6B7280, Beige=#F5F0E8, Navy=#1E3A5F, Burgundy=#800020, Gold=#FFD700, Coral=#FF6B6B, Turquoise=#40E0D0, Peach=#FFCBA4, Lavender=#E6E6FA, Mint=#98FB98, Cream=#FFFDD0, Charcoal=#36454F
 - STOCK PHOTOS: When user asks to "use stock photos", "use real photos", "no AI images", "use actual photos", or anything similar → set image_source="stock" on generate_post. This is CRITICAL. Default is "auto".
+- LANDSCAPE FORMAT: When user asks for "landscape", "16:9", "widescreen", "horizontal" or "can you make it landscape" → set format="landscape" on generate_post. Default is "square".
 - INSPIRATION POSTS: When user sends an image and says "make a post like this", "similar to this one", "based on this" → set use_last_inspiration=true on generate_post. This makes the template replicate the layout of THAT specific image. Do NOT set this for normal posts.
 - CLIENT RULES: When user says "never use X for client", "always use Y for client", "client should not have Z" → call save_client_rule to permanently store this. Do this IN ADDITION to any other action (like generating a new post). Example: "never use orange for Georgoulis" → save_client_rule + generate_post.
 - DESIGN SCOUT: When user asks to find fresh designs, inspiration, or specific styles, call scout_designs. Always set the focus field from what they say — e.g. "find me dark luxury posts" → focus="dark luxury editorial", "look for minimal health brand posts" → focus="minimal health brand", "something with bold typography" → focus="bold typography". If there are pending scout results, watch for the user's approval reply.
@@ -894,6 +900,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
     brief = params.get("brief", "creative post")
     platform = params.get("platform", "linkedin")
     image_source = params.get("image_source", "auto")
+    canvas_format = params.get("format", "square")
     use_last_inspiration = params.get("use_last_inspiration", False)
 
     # Get the specific inspiration reference if requested
@@ -924,7 +931,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
 
     style_overrides = params.get("style_overrides", {})
 
-    pipeline_input = PipelineInput(client=client_name, brief=brief, platform=platform)
+    pipeline_input = PipelineInput(client=client_name, brief=brief, platform=platform, format=canvas_format)
     prev = _previous_decisions.get(user_id)
     result = await run_pipeline(pipeline_input, brain, on_progress=on_progress, previous_decisions=prev, image_source=image_source, forced_reference=forced_reference)
 

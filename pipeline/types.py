@@ -14,6 +14,7 @@ class PipelineInput:
     brief: str
     platform: str = "linkedin"
     template_override: Optional[str] = None  # force a specific template
+    format: str = "square"  # "square" (1080x1080) or "landscape" (1920x1080)
 
 
 @dataclass

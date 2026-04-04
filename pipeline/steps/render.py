@@ -208,6 +208,13 @@ def _inject_into_template(
     return html
 
 
+def _canvas_size(canvas_format: str) -> tuple[int, int]:
+    """Return (width, height) for the given format string."""
+    if canvas_format == "landscape":
+        return 1920, 1080
+    return 1080, 1080  # default: square
+
+
 async def render(
     decisions: CreativeDecisions,
     image: ImageResult,
@@ -216,10 +223,12 @@ async def render(
     logo_b64: str | None = None,
     original_decisions: CreativeDecisions | None = None,
     extra_images: list[ImageResult] | None = None,
+    canvas_format: str = "square",
 ) -> RenderResult:
     """
-    Render the final post as a 1080x1080 PNG.
+    Render the final post as a PNG.
 
+    canvas_format: "square" (1080x1080) or "landscape" (1920x1080)
     If dynamic_html is provided, uses that directly.
     Otherwise loads from the template file on disk.
     """
@@ -233,7 +242,8 @@ async def render(
         template_path = Path(config.TEMPLATES_DIR) / f"{decisions.template}.html"
         if not template_path.exists():
             logger.warning(f"Template {decisions.template} not found — using fallback")
-            template_html = _fallback_template()
+            cw, ch = _canvas_size(canvas_format)
+            template_html = _fallback_template(cw, ch)
         else:
             template_html = template_path.read_text(encoding="utf-8")
 
@@ -246,12 +256,14 @@ async def render(
     timestamp = int(time.time())
     output_path = output_dir / f"{client_name.lower()}_{timestamp}.png"
 
+    canvas_w, canvas_h = _canvas_size(canvas_format)
+
     # Render with Playwright
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             args=["--no-sandbox", "--disable-setuid-sandbox"]
         )
-        page = await browser.new_page(viewport={"width": 1080, "height": 1080})
+        page = await browser.new_page(viewport={"width": canvas_w, "height": canvas_h})
 
         await page.set_content(final_html, wait_until="networkidle")
 
@@ -261,21 +273,21 @@ async def render(
         await page.screenshot(
             path=str(output_path),
             type="png",
-            clip={"x": 0, "y": 0, "width": 1080, "height": 1080},
+            clip={"x": 0, "y": 0, "width": canvas_w, "height": canvas_h},
         )
 
         await browser.close()
 
-    logger.info(f"Rendered: {output_path} ({output_path.stat().st_size / 1024:.0f} KB)")
+    logger.info(f"Rendered: {output_path} ({canvas_w}x{canvas_h}, {output_path.stat().st_size / 1024:.0f} KB)")
 
     return RenderResult(
         final_image_path=str(output_path),
-        width=1080,
-        height=1080,
+        width=canvas_w,
+        height=canvas_h,
     )
 
 
-def _fallback_template() -> str:
+def _fallback_template(canvas_w: int = 1080, canvas_h: int = 1080) -> str:
     """Minimal fallback template when no generated templates exist yet."""
     return """<!DOCTYPE html>
 <html>
@@ -284,7 +296,7 @@ def _fallback_template() -> str:
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      width: 1080px; height: 1080px;
+      width: CANVAS_WIDTHpx; height: CANVAS_HEIGHTpx;
       background-color: var(--color-bg, #F5F4F0);
       font-family: var(--font-headline, 'Inter'), sans-serif;
       overflow: hidden;
@@ -341,4 +353,4 @@ def _fallback_template() -> str:
   </div>
   <div class="client-label">{{CLIENT_NAME}}</div>
 </body>
-</html>"""
+</html>""".replace("CANVAS_WIDTH", str(canvas_w)).replace("CANVAS_HEIGHT", str(canvas_h))

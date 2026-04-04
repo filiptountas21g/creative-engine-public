@@ -102,6 +102,7 @@ async def generate_dynamic_template(
     forced_reference: dict | None = None,
     client: str = "ALL",
     anti_repetition: str | None = None,
+    canvas_format: str = "square",
 ) -> str:
     """
     Generate a fresh HTML template based on an inspiration reference.
@@ -162,15 +163,19 @@ ONLY ADAPT:
 MULTI-PHOTO: If the reference has multiple photos, use {{IMAGE_1}}, {{IMAGE_2}}, etc. — one per slot.
 Never use divs or colored boxes as image placeholders."""
 
+    # Canvas dimensions
+    canvas_w, canvas_h = (1920, 1080) if canvas_format == "landscape" else (1080, 1080)
+    canvas_label = f"{canvas_w}x{canvas_h}px ({'landscape 16:9' if canvas_format == 'landscape' else 'square 1:1'})"
+
     uniqueness_instruction = ""
     if not forced_reference:
-        uniqueness_instruction = """
+        uniqueness_instruction = f"""
 LAYOUT CREATIVITY — THIS IS CRITICAL:
 The default "split" layout (text left, image right) and "centered text over image" are BANNED unless
 the anti-repetition context explicitly allows them. Every post must feel like a different designer made it.
 
 Pick ONE of these structural approaches and commit to it fully:
-- FULL BLEED: image covers entire 1080x1080, bold text overlaid with contrast treatment
+- FULL BLEED: image covers entire {canvas_w}x{canvas_h}, bold text overlaid with contrast treatment
 - EDITORIAL GRID: asymmetric columns (30/70, 20/80), text at unexpected weight
 - TEXT DOMINANT: large typographic statement fills most of the canvas, tiny image accent
 - LAYERED: elements overlap — text sits partially on image, partially on color block
@@ -182,6 +187,8 @@ Pick ONE of these structural approaches and commit to it fully:
 Do NOT produce a 50/50 vertical split with text on the left."""
 
     user_prompt = f"""Create an HTML template for this post.
+
+CANVAS SIZE: {canvas_label} — the body must be exactly {canvas_w}px wide and {canvas_h}px tall.
 
 {"REFERENCE TO REPLICATE (match this layout closely):" if forced_reference else "INSPIRATION REFERENCE (use as creative starting point):"}
 {reference_text}
