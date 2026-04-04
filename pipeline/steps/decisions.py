@@ -129,7 +129,7 @@ async def creative_decisions(
     input: PipelineInput,
     concept: CreativeConcept,
     copy: CopyOptions,
-    image: ImageResult,
+    image: ImageResult | None,
     brain_ctx: BrainContext,
     previous_decisions: list[dict] | None = None,
     client_preferences: dict | None = None,
@@ -167,7 +167,7 @@ Three headline options:
 Subtext: {copy.subtext}
 CTA: {copy.cta}
 
-Image generated with: {image.model_used}
+Image generated with: {image.model_used if image else 'TBD — image generated after layout'}
 
 {font_instruction}
 

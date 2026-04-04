@@ -101,13 +101,7 @@ async def run_pipeline(
         result.copy = copy
         await _notify("copy", f"{len(copy.headlines)} headlines ready")
 
-        # Step 5: Image Generation (Opus prompt → Flux/Ideogram)
-        await _notify("image", "Generating hero image...")
-        image = await generate_image(concept, brain_ctx, image_source=image_source)
-        await _notify("image", f"Image ready ({image.model_used})")
-
-        result.hero_image = image
-
+        # Step 5: Creative Decisions (Opus) — done before image gen so we know the concept
         # Fetch client-specific preferences (liked colors, fonts, rules)
         client_prefs = get_client_preferences(brain, input.client)
         if client_prefs:
@@ -121,9 +115,9 @@ async def run_pipeline(
                 client_prefs = {}
             client_prefs["scout_fonts"] = scout_fonts
 
-        # Step 6: Creative Decisions (Opus)
+        # Step 5a: Creative Decisions (Opus)
         await _notify("decisions", "Opus is picking headline, font, colors...")
-        decisions = await creative_decisions(input, concept, copy, image, brain_ctx, previous_decisions, client_prefs)
+        decisions = await creative_decisions(input, concept, copy, None, brain_ctx, previous_decisions, client_prefs)
         result.decisions = decisions
         await _notify("decisions", (
             f"Template: {decisions.template}, "
@@ -141,24 +135,20 @@ async def run_pipeline(
         scout_hint = None
         if staleness.get("is_stale") and not forced_reference:
             await _notify("scout", "Layouts getting repetitive — checking for fresh ideas...")
-            # Try stored scout data first
             scout_hint = get_scout_inspiration(brain, input.client, staleness)
             if not scout_hint and staleness.get("should_scout"):
-                # Very stale + no scout data → run light Perplexity scout automatically
                 await _notify("scout", "Searching for fresh design inspiration...")
                 scout_result = await run_design_scout_auto(brain, client=input.client, staleness=staleness)
                 if scout_result.get("stored"):
                     scout_hint = get_scout_inspiration(brain, input.client, staleness)
                     await _notify("scout", f"Found {scout_result.get('layouts_found', 0)} fresh layouts")
 
-        # Step 6b: Dynamic Template (Opus generates fresh layout from inspiration)
+        # Step 6: Dynamic Template (Opus generates fresh layout from inspiration)
         if forced_reference:
             await _notify("template", "Replicating the layout from your inspiration image...")
         else:
             await _notify("template", "Generating unique layout from your inspiration...")
-        # Build anti-repetition context for template generation
         anti_repetition_ctx = ""
-        # Forced blueprint from scout takes priority
         if forced_layout_blueprint:
             anti_repetition_ctx = forced_layout_blueprint
         elif staleness.get("avoid_instructions"):
@@ -172,18 +162,48 @@ async def run_pipeline(
         )
         await _notify("template", "Layout ready")
 
-        # Count image slots in template — generate extra images if needed
+        # Step 7: Image Generation — AFTER template so we know what slots exist and their roles
         import re
+        image_slots = set(re.findall(r'\{\{IMAGE_(\d+)\}\}|\{\{IMAGE_PATH\}\}', dynamic_html))
+        has_any_image = bool(image_slots)
+
+        # Detect if IMAGE_1 is used as a full-bleed background (position:absolute / z-index:-1 near it)
+        is_background_image = bool(re.search(
+            r'z-index\s*:\s*-|position\s*:\s*absolute[^}]*(?:width\s*:\s*100|height\s*:\s*100)',
+            dynamic_html, re.IGNORECASE
+        )) or "background" in dynamic_html.lower().split("{{IMAGE")[0][-200:] if "{{IMAGE" in dynamic_html else False
+
+        image = None
         extra_images = []
-        image_slots = set(re.findall(r'\{\{IMAGE_(\d+)\}\}', dynamic_html))
-        max_slot = max((int(s) for s in image_slots), default=1)
-        if max_slot > 1:
-            extra_count = max_slot - 1  # IMAGE_1 is the hero, need 2..N
-            await _notify("image", f"Template needs {max_slot} images — generating {extra_count} more...")
-            extra_images = await generate_extra_images(
-                concept, brain_ctx, count=extra_count, image_source=image_source,
-            )
-            await _notify("image", f"{len(extra_images)} extra images ready")
+
+        if has_any_image:
+            # Background image → AI only (gradients, abstracts look terrible as stock photos)
+            effective_source = "ai" if is_background_image else image_source
+            if is_background_image:
+                await _notify("image", "Generating AI background image...")
+                logger.info("IMAGE_1 is a background — forcing AI generation")
+            else:
+                await _notify("image", "Generating hero image...")
+
+            image = await generate_image(concept, brain_ctx, image_source=effective_source)
+            result.hero_image = image
+            await _notify("image", f"Image ready ({image.model_used})")
+
+            # Generate extra images for multi-slot templates
+            slot_nums = set()
+            for m in re.finditer(r'\{\{IMAGE_(\d+)\}\}', dynamic_html):
+                slot_nums.add(int(m.group(1)))
+            max_slot = max(slot_nums) if slot_nums else 1
+            if max_slot > 1:
+                extra_count = max_slot - 1
+                await _notify("image", f"Template needs {max_slot} images — generating {extra_count} more...")
+                extra_images = await generate_extra_images(
+                    concept, brain_ctx, count=extra_count, image_source=image_source,
+                )
+                await _notify("image", f"{len(extra_images)} extra images ready")
+        else:
+            logger.info("Template has no image slots — skipping image generation")
+            await _notify("image", "Text-only layout — no image needed")
 
         # Step 7: Render → Critique → Fix loop (max 2 revision passes)
         MAX_REVISIONS = 2

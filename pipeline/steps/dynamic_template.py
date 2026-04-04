@@ -68,11 +68,13 @@ MULTIPLE IMAGES: If the layout needs multiple images (e.g. a grid of speakers, a
   <img src="{{IMAGE_2}}" alt="speaker 2">
   Use multiple images when the reference has multiple photos or when the layout benefits from it.
 
-CRITICAL RULES:
-- Every template MUST include at least <img src="{{IMAGE_1}}"> (or {{IMAGE_PATH}})
-- Do NOT use background-image CSS for images
-- In MODE B (inspiration): make each layout genuinely different — vary grid structures, text placement, image sizing, decorative elements. Be creative: overlapping elements, asymmetric grids, text over image, sidebar layouts, diagonal cuts.
-- In MODE A (replicate): match the reference precisely — do not simplify or genericise it.
+IMAGE RULES — read carefully:
+- GRADIENT or ABSTRACT BACKGROUND: Do NOT write CSS gradients. Use <img src="{{IMAGE_1}}"> as a full-bleed background (position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; z-index:0). The AI generates the visual. All text/elements go on top (z-index:1+).
+- SUBJECT PHOTO: Use <img src="{{IMAGE_1}}"> normally as the hero image in the layout.
+- TEXT ON SOLID COLOR (no photo, no gradient): Do NOT include any {{IMAGE}} placeholder. Use only var(--color-bg) as background. This is valid.
+- NEVER use CSS background-image, CSS gradients, or linear-gradient() for visuals — always use <img> tags with {{IMAGE_N}} placeholders so the AI can generate or source the image.
+- In MODE B: make each layout genuinely different — asymmetric grids, overlapping elements, editorial compositions, diagonal cuts.
+- In MODE A: match the reference precisely — do not simplify or genericise it.
 - NEVER write actual text content into the HTML. ONLY use placeholders: {{HEADLINE}}, {{SUBTEXT}}, {{CTA}}, {{CLIENT_NAME}}
   For example, write: <h1>{{HEADLINE}}</h1>
   NEVER write: <h1>Clear thinking. Elevated results.</h1>
