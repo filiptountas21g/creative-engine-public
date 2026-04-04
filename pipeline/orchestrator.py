@@ -91,10 +91,27 @@ async def run_pipeline(
         ))
 
         # Step 3: Creative Concept (Opus)
-        await _notify("concept", "Opus is thinking about the visual concept...")
-        concept = await creative_concept(input, research_result, brain_ctx)
-        result.concept = concept
-        await _notify("concept", f"Concept: {concept.object}")
+        # In COPY mode, skip the creative concept — it generates unrelated ideas.
+        # The decomposer + photo_prompts will drive image generation instead.
+        is_copy_mode = bool(forced_reference and forced_reference.get("_image_b64"))
+        if is_copy_mode:
+            from pipeline.types import CreativeConcept
+            concept = CreativeConcept(
+                object=input.brief,
+                why="Replicating reference design",
+                emotional_direction="Match the reference image",
+                composition_note="Copy the reference layout exactly",
+                background="#000000",
+                lighting="Match reference",
+                what_to_avoid="Anything not in the reference",
+            )
+            result.concept = concept
+            await _notify("concept", "Copy mode — skipping creative concept, using reference directly")
+        else:
+            await _notify("concept", "Opus is thinking about the visual concept...")
+            concept = await creative_concept(input, research_result, brain_ctx)
+            result.concept = concept
+            await _notify("concept", f"Concept: {concept.object}")
 
         # Step 4: Copy (Sonnet)
         await _notify("copy", "Sonnet is writing headlines...")
