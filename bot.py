@@ -457,17 +457,14 @@ TOOLS = [
                 "image_padding": {"type": "integer", "description": "Image padding (0-200px)"},
                 "add_logo": {"type": "boolean", "description": "Set true to add the client's logo"},
                 "remove_logo": {"type": "boolean", "description": "Set true to remove the logo"},
-                "add_image_prompt": {
+                "add_element": {
                     "type": "string",
                     "description": (
-                        "AI image generation prompt for a NEW visual element to add to the design. "
-                        "Use when the user wants to ADD a photo/person/object to the existing post — "
-                        "e.g. 'add a woman', 'put a portrait there', 'add a product photo'. "
-                        "Write a detailed AI image generation prompt describing the subject, style, lighting, "
-                        "and angle. Must be paired with feedback describing WHERE to place it. "
-                        "Example: add_image_prompt='Professional woman in white coat, studio lighting, "
-                        "warm tones, shoulders up, smiling confidently, clean background' + "
-                        "feedback='Add this person image on the right side of the design, 40% width'"
+                        "Description of a visual element to ADD to the design. "
+                        "Use when the user wants to add a photo/person/object that's NOT already in the post. "
+                        "Just describe WHAT — e.g. 'the woman from the inspiration', 'a portrait', 'a product photo'. "
+                        "Opus will look at the reference image and write the AI generation prompt itself. "
+                        "Pair with feedback for WHERE to place it — e.g. 'on the right side, 40% width'."
                     ),
                 },
             },
@@ -787,7 +784,7 @@ Rules:
 - Only change the MINIMUM fields needed for edit_post.
 - If the user just wants to chat or says hi, respond naturally without calling any tools.
 - HONESTY: NEVER say you did something unless a tool was actually called. If you can't do what the user asks, say so honestly. Don't say "Done!" or "I've added that" unless a tool executed and returned a new image.
-- ADDING ELEMENTS: When user wants to ADD a visual element to an existing post (a person, object, photo, icon), use edit_post with BOTH feedback (WHERE to place it) AND add_image_prompt (WHAT to generate). Without add_image_prompt, the image won't be generated and the element will be missing from the result.
+- ADDING ELEMENTS: When user wants to ADD a visual element to an existing post (a person, object, photo, icon), use edit_post with BOTH feedback (WHERE to place it) AND add_element (WHAT to add, e.g. "the woman from the inspiration", "a product shot"). Opus will look at the reference image and write the generation prompt. Without add_element, the image won't be generated.
 - COLOR CHANGES: When user says "replace X with Y", change ALL fields containing that color (color_bg, color_accent, color_text, color_subtext). Use DISTINCT, clearly different hex values — never subtle variations.
   Reference: Red=#DC2626, Orange=#EA580C, Amber=#D97706, Yellow=#EAB308, Lime=#65A30D, Green=#16A34A, Emerald=#059669, Teal=#0D9488, Cyan=#0891B2, Sky=#0284C7, Blue=#2563EB, Indigo=#4F46E5, Violet=#7C3AED, Purple=#9333EA, Fuchsia=#C026D3, Pink=#DB2777, Rose=#E11D48, White=#FFFFFF, Black=#000000, Gray=#6B7280, Beige=#F5F0E8, Navy=#1E3A5F, Burgundy=#800020, Gold=#FFD700, Coral=#FF6B6B, Turquoise=#40E0D0, Peach=#FFCBA4, Lavender=#E6E6FA, Mint=#98FB98, Cream=#FFFDD0, Charcoal=#36454F
 - STOCK PHOTOS: When user asks to "use stock photos", "use real photos", "no AI images", "use actual photos", or anything similar → set image_source="stock" on generate_post. This is CRITICAL. Default is "auto".
@@ -1157,6 +1154,11 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
             await msg.reply_text(result_text, parse_mode="HTML")
 
         if result.decisions and result.hero_image:
+            # Store reference image bytes if available (for Opus to see during edits)
+            ref_image_b64 = None
+            if forced_reference and isinstance(forced_reference, dict):
+                ref_image_b64 = forced_reference.get("_image_b64")
+
             post_data = {
                 "decisions": result.decisions,
                 "image": result.hero_image,
@@ -1168,6 +1170,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
                 "extra_images": result.extra_images,
                 "canvas_format": canvas_format,
                 "reference_elements": result.reference_elements,
+                "reference_image_b64": ref_image_b64,
             }
             _last_post_by_user[user_id] = post_data
             _remember(user_id, "post", post_data, label=f"{client_name}: {result.decisions.headline[:40]}")
@@ -1313,7 +1316,10 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
 
         # Extract freeform feedback (handled separately via Opus HTML fix)
         user_feedback = changes.pop("feedback", None)
-        add_image_prompt = changes.pop("add_image_prompt", None)
+        add_element = changes.pop("add_element", None)
+        # Legacy support
+        if not add_element:
+            add_element = changes.pop("add_image_prompt", None)
 
         # Apply changes to decisions
         new_decisions = replace(decisions, **{
@@ -1325,33 +1331,50 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
 
         template_html = post_data.get("template_html")
         extra_images = post_data.get("extra_images") or []
+        reference_image_b64 = post_data.get("reference_image_b64")
 
-        # Generate a new image element if requested (e.g. "add a woman")
+        # Also check if the user's latest analysis has the image
+        if not reference_image_b64 and user_id in _last_analysis_by_user:
+            reference_image_b64 = _last_analysis_by_user[user_id].get("_image_b64")
+
+        # Generate a new image element if requested (e.g. "add the woman from the inspiration")
         new_image_slot = None
-        if add_image_prompt:
-            await status_msg.edit_text("🖼️ Generating the new image element...")
+        generated_prompt = None
+        if add_element:
+            await status_msg.edit_text("👁️ Opus is analyzing the reference to write the image prompt...")
             try:
                 from dataclasses import replace as dc_replace
                 from pipeline.steps.brain_read import brain_read
+                from pipeline.steps.dynamic_template import describe_element_for_generation
 
+                # Step 1: Opus looks at the reference image and writes a precise generation prompt
+                if reference_image_b64:
+                    generated_prompt = await describe_element_for_generation(reference_image_b64, add_element)
+                    logger.info(f"[edit] Opus wrote prompt from reference: {generated_prompt[:100]}")
+                else:
+                    generated_prompt = add_element
+                    logger.info(f"[edit] No reference image — using raw description: {add_element}")
+
+                await status_msg.edit_text(f"🖼️ Generating: {generated_prompt[:50]}...")
+
+                # Step 2: Generate the image using Opus's prompt
                 concept = post_data.get("concept")
-                pipeline_input = PipelineInput(client=client_name, brief=add_image_prompt)
+                pipeline_input = PipelineInput(client=client_name, brief=generated_prompt)
                 brain_ctx = await brain_read(pipeline_input, brain)
 
-                # Build a focused concept for this specific element
                 if concept:
                     element_concept = dc_replace(
                         concept,
-                        object=add_image_prompt,
-                        why="Additional visual element for the design",
+                        object=generated_prompt,
+                        why=f"Visual element: {add_element}",
                         composition_note="Single subject, clean background, suitable for compositing into a design layout",
                         what_to_avoid="text, logos, busy backgrounds, multiple subjects",
                     )
                 else:
                     from pipeline.types import CreativeConcept
                     element_concept = CreativeConcept(
-                        object=add_image_prompt,
-                        why="Visual element requested by user",
+                        object=generated_prompt,
+                        why=f"Visual element: {add_element}",
                         emotional_direction="professional, clean",
                         background_color="#ffffff",
                         lighting="studio lighting",
@@ -1360,10 +1383,9 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
                     )
 
                 new_element_image = await generate_image(element_concept, brain_ctx, image_source="ai")
-                # Determine the next slot number
                 new_image_slot = len(extra_images) + 2  # +2 because IMAGE_1 is the hero
                 extra_images = list(extra_images) + [new_element_image]
-                logger.info(f"[edit] Generated new element image as IMAGE_{new_image_slot}: {add_image_prompt[:60]}")
+                logger.info(f"[edit] Generated element image as IMAGE_{new_image_slot}")
             except Exception as e:
                 logger.error(f"[edit] Failed to generate element image: {e}")
                 await status_msg.edit_text(f"⚠️ Couldn't generate the image, but applying other changes...")
@@ -1374,8 +1396,8 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             logger.info(f"[edit] Regenerating HTML: {reason}")
             template_html = await generate_dynamic_template(new_decisions, brain, has_logo=logo_b64 is not None)
 
-        # Apply freeform feedback — Opus directly edits the HTML/CSS
-        if user_feedback and template_html:
+        # Apply freeform feedback — Opus directly edits the HTML/CSS (now with reference image)
+        if (user_feedback or new_image_slot) and template_html:
             from pipeline.steps.dynamic_template import fix_template_from_critique
             await status_msg.edit_text("✏️ Opus is adjusting the layout...")
 
@@ -1383,28 +1405,33 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             image_slot_info = ""
             if new_image_slot:
                 slot_placeholder = "{{IMAGE_" + str(new_image_slot) + "}}"
+                desc = generated_prompt or add_element or "new visual element"
                 image_slot_info = (
                     f"\n\n⚠️ NEW IMAGE AVAILABLE: A new image has been generated and is ready at placeholder {slot_placeholder}\n"
-                    f"Description: {add_image_prompt}\n"
+                    f"Description: {desc[:200]}\n"
                     f"You MUST add an <img> tag using src=\"{slot_placeholder}\" in the HTML where the user wants it.\n"
                     f"Style it with appropriate CSS (position, size, border-radius, object-fit, etc).\n"
                 )
 
+            feedback_text = user_feedback or f"Add the new image element ({add_element}) to the design."
             critique_text = (
                 f"USER FEEDBACK — fix these issues in the HTML/CSS:\n\n"
-                f"[CRITICAL] user_feedback: {user_feedback}\n"
+                f"[CRITICAL] user_feedback: {feedback_text}\n"
                 f"  → Fix: Apply the user's requested change to the template HTML/CSS.\n"
                 f"{image_slot_info}"
             )
-            logger.info(f"[edit] Applying user feedback via Opus: {user_feedback}")
-            template_html = await fix_template_from_critique(template_html, critique_text, new_decisions)
+            logger.info(f"[edit] Applying feedback via Opus (with reference image: {bool(reference_image_b64)}): {feedback_text[:80]}")
+            template_html = await fix_template_from_critique(
+                template_html, critique_text, new_decisions,
+                reference_image_b64=reference_image_b64,
+            )
 
         render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64, original_decisions=decisions, extra_images=extra_images or None, canvas_format=canvas_format)
 
         # Build change summary
         change_descriptions = []
-        if add_image_prompt:
-            change_descriptions.append(f"  • Added new image: {add_image_prompt[:60]}")
+        if add_element:
+            change_descriptions.append(f"  • Added element: {add_element[:60]}")
         if user_feedback:
             change_descriptions.append(f"  • Layout adjusted: {user_feedback}")
         if needs_template_regen and logo_b64:

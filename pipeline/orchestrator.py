@@ -320,10 +320,11 @@ async def run_pipeline(
                 await _notify("critique", "✓ Design approved")
                 break
 
-            # Fix the template based on critique
+            # Fix the template based on critique — pass reference image if available
             critique_text = format_critique_for_fix(critique)
             await _notify("fix", f"Fixing {len(critique.get('issues', []))} issues...")
-            current_html = await fix_template_from_critique(current_html, critique_text, decisions)
+            ref_b64 = forced_reference.get("_image_b64") if forced_reference and isinstance(forced_reference, dict) else None
+            current_html = await fix_template_from_critique(current_html, critique_text, decisions, reference_image_b64=ref_b64)
             logger.info(f"Template fixed (iteration {iteration}), re-rendering...")
 
         result.image_path = render_result.final_image_path

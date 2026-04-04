@@ -400,11 +400,13 @@ async def fix_template_from_critique(
     current_html: str,
     critique_text: str,
     decisions: CreativeDecisions,
+    reference_image_b64: str | None = None,
 ) -> str:
     """
     Fix an HTML template based on visual critique feedback.
 
     Takes the current HTML and critique instructions, returns fixed HTML.
+    Optionally receives the reference image so Opus can see what the user wants.
     """
     user_prompt = f"""Fix this HTML template based on the visual review.
 
@@ -425,11 +427,36 @@ DESIGN DECISIONS (for reference):
 Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
 
     try:
+        # Build message content — include reference image if available
+        message_content = []
+
+        if reference_image_b64:
+            import base64 as _b64
+            try:
+                raw = _b64.b64decode(reference_image_b64[:32])
+                if raw[:4] == b'RIFF' or b'WEBP' in raw[:12]:
+                    ref_media = "image/webp"
+                elif raw[:8] == b'\x89PNG\r\n\x1a\n':
+                    ref_media = "image/png"
+                else:
+                    ref_media = "image/jpeg"
+            except Exception:
+                ref_media = "image/jpeg"
+
+            message_content.append({"type": "text", "text": "REFERENCE IMAGE (this is what the user wants the design to look like):"})
+            message_content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": ref_media, "data": reference_image_b64}
+            })
+            logger.info("Sending reference image to Opus for template fix")
+
+        message_content.append({"type": "text", "text": user_prompt})
+
         response = _client.messages.create(
             model=config.OPUS_MODEL,
             max_tokens=8192,
             system=FIX_TEMPLATE_SYSTEM,
-            messages=[{"role": "user", "content": user_prompt}],
+            messages=[{"role": "user", "content": message_content}],
         )
 
         html = response.content[0].text.strip()
@@ -487,6 +514,62 @@ Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
         logger.error(f"Template fix failed: {e}")
         # Return original HTML if fix fails
         return current_html
+
+
+async def describe_element_for_generation(
+    reference_image_b64: str,
+    element_description: str,
+) -> str:
+    """
+    Opus looks at the reference image and writes an AI image generation prompt
+    for a specific element the user wants to add/recreate.
+
+    Args:
+        reference_image_b64: The inspiration image (base64)
+        element_description: What the user wants, e.g. "the woman", "the background gradient"
+
+    Returns:
+        A detailed image generation prompt suitable for Flux/Ideogram
+    """
+    import base64 as _b64
+    try:
+        raw = _b64.b64decode(reference_image_b64[:32])
+        if raw[:4] == b'RIFF' or b'WEBP' in raw[:12]:
+            media = "image/webp"
+        elif raw[:8] == b'\x89PNG\r\n\x1a\n':
+            media = "image/png"
+        else:
+            media = "image/jpeg"
+    except Exception:
+        media = "image/jpeg"
+
+    try:
+        response = _client.messages.create(
+            model=config.OPUS_MODEL,
+            max_tokens=500,
+            system=(
+                "You are an expert at writing AI image generation prompts. "
+                "The user will show you a reference image and describe which element they want recreated. "
+                "Write a detailed prompt that an AI image generator (Flux/Ideogram) can use to produce that element. "
+                "Include: subject, pose/angle, lighting, style, mood, colors, background treatment. "
+                "The prompt should recreate the LOOK and FEEL of that element, not be a generic description. "
+                "Return ONLY the prompt text, nothing else. Keep it under 200 words."
+            ),
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "REFERENCE IMAGE:"},
+                    {"type": "image", "source": {"type": "base64", "media_type": media, "data": reference_image_b64}},
+                    {"type": "text", "text": f"Write an AI image generation prompt for this element: {element_description}\n\nThe prompt should recreate this specific visual element as closely as possible."},
+                ],
+            }],
+        )
+        prompt = response.content[0].text.strip()
+        logger.info(f"Opus wrote generation prompt for '{element_description[:40]}': {prompt[:100]}...")
+        return prompt
+    except Exception as e:
+        logger.error(f"Failed to generate element prompt from reference: {e}")
+        return element_description  # Fallback to the user's description
 
 
 def _pick_reference(
