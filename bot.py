@@ -1058,6 +1058,8 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
     pipeline_input = PipelineInput(client=client_name, brief=brief, platform=platform, format=canvas_format)
     prev = _previous_decisions.get(user_id)
     result = await run_pipeline(pipeline_input, brain, on_progress=on_progress, previous_decisions=prev, image_source=image_source, forced_reference=forced_reference)
+    # Orchestrator may have auto-detected landscape from reference — read it back
+    canvas_format = getattr(pipeline_input, "format", canvas_format)
 
     # Apply style overrides — user specified colors/fonts that override the AI's choices
     if style_overrides and result.success and result.decisions:
@@ -1074,6 +1076,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
                     result.decisions, result.hero_image, client_name,
                     dynamic_html=result.template_html, logo_b64=result.logo_b64,
                     extra_images=result.extra_images,
+                    canvas_format=canvas_format,
                 )
                 result.image_path = render_result.final_image_path
             except Exception as e:
