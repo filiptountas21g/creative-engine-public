@@ -117,6 +117,14 @@ class Brain:
             [client or "ALL", topic, source, content, summary, tags_str, week, _now()],
         )
 
+    def delete_by_topic_source(self, topic: str, source: str) -> None:
+        """Delete all entries matching a topic + source combo.
+        Used to keep session data (1 row per user) from accumulating."""
+        self._execute(
+            "DELETE FROM brain_entries WHERE topic = ? AND source = ?",
+            [topic, source],
+        )
+
     def store_batch(self, entries: list) -> int:
         """Store multiple entries. Returns count stored."""
         count = 0

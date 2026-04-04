@@ -77,12 +77,14 @@ _restored_users: set[int] = set()
 
 
 def _persist_user_reference(user_id: int):
-    """Save the user's last reference analysis + image to Brain (survives restarts)."""
+    """Save the user's last reference analysis + image to Brain (survives restarts).
+    Deletes old entry first — only 1 row per user ever exists."""
     if user_id not in _last_analysis_by_user:
         return
     try:
         data = _last_analysis_by_user[user_id].copy()
-        # Store as JSON — _image_b64 included (typically 100-300KB)
+        # Delete old entry first — keeps exactly 1 row per user
+        brain.delete_by_topic_source("user_session_reference", str(user_id))
         brain.store(
             topic="user_session_reference",
             source=str(user_id),
@@ -96,7 +98,8 @@ def _persist_user_reference(user_id: int):
 
 
 def _persist_chat_history(user_id: int):
-    """Save the user's chat history to Brain (survives restarts)."""
+    """Save the user's chat history to Brain (survives restarts).
+    Deletes old entry first — only 1 row per user ever exists."""
     hist = _chat_history.get(user_id, [])
     if not hist:
         return
@@ -116,6 +119,8 @@ def _persist_chat_history(user_id: int):
                 if slim_blocks:
                     slim_hist.append({"role": msg["role"], "content": slim_blocks})
 
+        # Delete old entry first — keeps exactly 1 row per user
+        brain.delete_by_topic_source("user_session_chat", str(user_id))
         brain.store(
             topic="user_session_chat",
             source=str(user_id),
