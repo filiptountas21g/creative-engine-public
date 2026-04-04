@@ -201,6 +201,19 @@ Return the complete HTML file."""
             reference_image_b64 = forced_reference.get("_image_b64")
 
         if reference_image_b64:
+            # Detect actual image format from magic bytes — don't assume jpeg
+            import base64 as _b64
+            raw = _b64.b64decode(reference_image_b64[:32])
+            if raw[:4] == b'RIFF' or raw[:4] == b'WEBP' or b'WEBP' in raw[:12]:
+                ref_media_type = "image/webp"
+            elif raw[:8] == b'\x89PNG\r\n\x1a\n':
+                ref_media_type = "image/png"
+            elif raw[:3] == b'GIF':
+                ref_media_type = "image/gif"
+            else:
+                ref_media_type = "image/jpeg"  # default
+            logger.info(f"Reference image media type detected: {ref_media_type}")
+
             message_content.append({
                 "type": "text",
                 "text": "REFERENCE IMAGE (replicate this layout):"
@@ -209,7 +222,7 @@ Return the complete HTML file."""
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": "image/jpeg",
+                    "media_type": ref_media_type,
                     "data": reference_image_b64,
                 }
             })

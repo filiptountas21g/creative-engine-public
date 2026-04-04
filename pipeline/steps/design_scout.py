@@ -1017,7 +1017,19 @@ async def extract_single_reference(pending: dict, item_index: int) -> Optional[d
         # Step 2: Save temporarily, run Vision analysis, and upload to Drive
         temp_path = None
         try:
-            # Save to temp file for Vision
+            # Detect format and convert WebP → JPEG (Claude handles JPEG more reliably)
+            if image_bytes[:4] == b'RIFF' or b'WEBP' in image_bytes[:12]:
+                try:
+                    from PIL import Image as _PIL
+                    import io as _io
+                    img_pil = _PIL.open(_io.BytesIO(image_bytes)).convert("RGB")
+                    buf = _io.BytesIO()
+                    img_pil.save(buf, format="JPEG", quality=90)
+                    image_bytes = buf.getvalue()
+                    logger.info("Converted WebP reference image to JPEG")
+                except Exception as e:
+                    logger.warning(f"WebP→JPEG conversion failed: {e}")
+
             suffix = ".jpg"
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
                 f.write(image_bytes)
