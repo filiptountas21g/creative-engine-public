@@ -83,7 +83,7 @@ async def extract_layout_tags(image_path: str) -> dict:
 
         client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model="claude-haiku-4-20250414",
+            model="claude-haiku-4-5",
             max_tokens=256,
             messages=[{
                 "role": "user",
@@ -651,7 +651,7 @@ async def scout_search(
     # No Claude curation — results are already from Behance/Dribbble only (whitelist filtered).
     # You are the curator — save what you like, reject what you don't.
     items = []
-    for i, img in enumerate(all_images[:15]):
+    for i, img in enumerate(all_images[:8]):
         items.append({
             "index": i + 1,
             "name": img.get("title", "Design")[:50],
@@ -737,7 +737,7 @@ async def scout_approve(
     logger.info(f"Scout: stored {len(approved_items)} approved layouts + {len(all_urls)} seen URLs in Brain")
 
     return {
-        "layouts_found": len(approved_names),
+        "layouts_found": len(approved_items),
         "layouts_text": layouts_text,
         "stored": True,
     }

@@ -167,11 +167,12 @@ async def run_pipeline(
         image_slots = set(re.findall(r'\{\{IMAGE_(\d+)\}\}|\{\{IMAGE_PATH\}\}', dynamic_html))
         has_any_image = bool(image_slots)
 
-        # Detect if IMAGE_1 is used as a full-bleed background (position:absolute / z-index:-1 near it)
+        # Detect if IMAGE_1 is a full-bleed background — only if Opus explicitly used z-index:-1
+        # or placed img with width:100%;height:100% AND position:absolute at top:0/left:0
         is_background_image = bool(re.search(
-            r'z-index\s*:\s*-|position\s*:\s*absolute[^}]*(?:width\s*:\s*100|height\s*:\s*100)',
+            r'z-index\s*:\s*-\d',
             dynamic_html, re.IGNORECASE
-        )) or "background" in dynamic_html.lower().split("{{IMAGE")[0][-200:] if "{{IMAGE" in dynamic_html else False
+        ))
 
         image = None
         extra_images = []
