@@ -307,42 +307,48 @@ async def run_pipeline(
             logger.info("Template has no image slots — skipping image generation")
             await _notify("image", "Text-only layout — no image needed")
 
-        # Step 7: Render → Critique → Fix loop (max 2 revision passes)
-        MAX_REVISIONS = 2
+        # Step 7: Render → Critique → Fix loop
         current_html = dynamic_html
 
-        for iteration in range(1, MAX_REVISIONS + 2):  # 1 = first render, 2-3 = revisions
-            await _notify("render", f"Rendering {'final ' if iteration > MAX_REVISIONS else ''}PNG{f' (revision {iteration - 1})' if iteration > 1 else ''}...")
+        if is_copy_mode:
+            # COPY MODE: Skip critique entirely — it judges by "social media post" standards
+            # and destroys complex layouts (dashboards, glassmorphism, etc.) thinking they're bugs.
+            # The template was built from the reference decomposition — render once and deliver.
+            await _notify("render", "Rendering final PNG (copy mode — no critique)...")
             render_result = await render(decisions, image, input.client, dynamic_html=current_html, logo_b64=logo_b64, extra_images=extra_images, canvas_format=getattr(input, "format", "square"))
+            logger.info("Copy mode — skipping critique loop to preserve reference layout")
+        else:
+            # NORMAL MODE: Critique → Fix loop (max 2 revision passes)
+            MAX_REVISIONS = 2
+            for iteration in range(1, MAX_REVISIONS + 2):
+                await _notify("render", f"Rendering {'final ' if iteration > MAX_REVISIONS else ''}PNG{f' (revision {iteration - 1})' if iteration > 1 else ''}...")
+                render_result = await render(decisions, image, input.client, dynamic_html=current_html, logo_b64=logo_b64, extra_images=extra_images, canvas_format=getattr(input, "format", "square"))
 
-            # Skip critique on last allowed iteration or if we've done max revisions
-            if iteration > MAX_REVISIONS:
-                break
+                if iteration > MAX_REVISIONS:
+                    break
 
-            # Critique the render — with taste + client brand context
-            await _notify("critique", f"Art director reviewing design (pass {iteration})...")
-            taste_ctx = _get_taste_description(brain, client=input.client if input.client != "ALL" else None)
-            client_ctx = _get_client_brand_context(brain, input.client) if input.client != "ALL" else None
-            critique = await critique_render(
-                render_result.final_image_path, decisions, current_html,
-                iteration=iteration, forced_reference=forced_reference,
-                taste_context=taste_ctx or None,
-                client_context=client_ctx or None,
-            )
-            score = critique.get("score", 5)
-            logger.info(f"Critique score: {score}/10")  # Kept in logs only
+                await _notify("critique", f"Art director reviewing design (pass {iteration})...")
+                taste_ctx = _get_taste_description(brain, client=input.client if input.client != "ALL" else None)
+                client_ctx = _get_client_brand_context(brain, input.client) if input.client != "ALL" else None
+                critique = await critique_render(
+                    render_result.final_image_path, decisions, current_html,
+                    iteration=iteration, forced_reference=forced_reference,
+                    taste_context=taste_ctx or None,
+                    client_context=client_ctx or None,
+                )
+                score = critique.get("score", 5)
+                logger.info(f"Critique score: {score}/10")
 
-            if not needs_revision(critique):
-                logger.info(f"Design approved at score {score}/10 on iteration {iteration}")
-                await _notify("critique", "✓ Design approved")
-                break
+                if not needs_revision(critique):
+                    logger.info(f"Design approved at score {score}/10 on iteration {iteration}")
+                    await _notify("critique", "✓ Design approved")
+                    break
 
-            # Fix the template based on critique — pass reference image if available
-            critique_text = format_critique_for_fix(critique)
-            await _notify("fix", f"Fixing {len(critique.get('issues', []))} issues...")
-            ref_b64 = forced_reference.get("_image_b64") if forced_reference and isinstance(forced_reference, dict) else None
-            current_html = await fix_template_from_critique(current_html, critique_text, decisions, reference_image_b64=ref_b64)
-            logger.info(f"Template fixed (iteration {iteration}), re-rendering...")
+                critique_text = format_critique_for_fix(critique)
+                await _notify("fix", f"Fixing {len(critique.get('issues', []))} issues...")
+                ref_b64 = forced_reference.get("_image_b64") if forced_reference and isinstance(forced_reference, dict) else None
+                current_html = await fix_template_from_critique(current_html, critique_text, decisions, reference_image_b64=ref_b64)
+                logger.info(f"Template fixed (iteration {iteration}), re-rendering...")
 
         result.image_path = render_result.final_image_path
         result.template_html = current_html
