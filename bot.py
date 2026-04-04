@@ -1005,6 +1005,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
                 "logo_b64": result.logo_b64,
                 "rendered_path": result.image_path,
                 "extra_images": result.extra_images,
+                "canvas_format": canvas_format,
             }
             _last_post_by_user[user_id] = post_data
             _remember(user_id, "post", post_data, label=f"{client_name}: {result.decisions.headline[:40]}")
@@ -1107,6 +1108,7 @@ async def _exec_generate_carousel(params: dict, user_id: int, msg) -> str:
                 "logo_b64": getattr(last, 'logo_b64', None),
                 "rendered_path": last.image_path,
                 "extra_images": getattr(last, 'extra_images', None),
+                "canvas_format": "square",  # carousels are always square
             }
 
 
@@ -1122,6 +1124,7 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
     decisions = post_data["decisions"]
     image = post_data["image"]
     client_name = post_data["client"]
+    canvas_format = post_data.get("canvas_format", "square")
 
     status_msg = await msg.reply_text("✏️ Editing your post...")
 
@@ -1178,7 +1181,7 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             template_html = await fix_template_from_critique(template_html, critique_text, new_decisions)
 
         extra_images = post_data.get("extra_images")
-        render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64, original_decisions=decisions, extra_images=extra_images)
+        render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64, original_decisions=decisions, extra_images=extra_images, canvas_format=canvas_format)
 
         # Build change summary
         change_descriptions = []
@@ -1209,6 +1212,7 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             "logo_b64": logo_b64,
             "rendered_path": render_result.final_image_path,
             "extra_images": extra_images,
+            "canvas_format": canvas_format,
         }
 
         return f"Post edited. Changes: {changes_text}"
@@ -1230,6 +1234,7 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
     client_name = post_data["client"]
     template_html = post_data.get("template_html")
     logo_b64 = post_data.get("logo_b64")
+    canvas_format = post_data.get("canvas_format", "square")
 
     if not concept:
         return "No concept stored from the last post — generate a new one."
@@ -1262,7 +1267,7 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
         render_result = await render_post(
             decisions, new_image, client_name,
             dynamic_html=template_html, logo_b64=logo_b64,
-            extra_images=extra_images,
+            extra_images=extra_images, canvas_format=canvas_format,
         )
 
         if background_style:
@@ -1291,6 +1296,7 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
             "logo_b64": logo_b64,
             "rendered_path": render_result.final_image_path,
             "extra_images": extra_images,
+            "canvas_format": canvas_format,
         }
 
         return f"Image replaced ({new_image.model_used}). Same layout."
@@ -1763,6 +1769,7 @@ async def _exec_generate_from_scout(params: dict, user_id: int, msg) -> str:
                     "logo_b64": result.logo_b64,
                     "rendered_path": result.image_path,
                     "extra_images": result.extra_images,
+                    "canvas_format": "square",  # scout-generated posts are always square
                 }
                 _last_post_by_user[user_id] = post_data
                 _remember(user_id, "post", post_data, label=f"{client_name}: {result.decisions.headline[:40]}")
