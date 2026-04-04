@@ -308,7 +308,8 @@ TOOLS = [
             "translating, restyling, changing text, adjusting layout. "
             "For visual/layout feedback like 'make pictures bigger', 'move text to the right', 'more spacing', "
             "use the 'feedback' field — Opus will directly edit the HTML/CSS to fix it. "
-            "IMPORTANT: Only include fields that need to change."
+            "IMPORTANT: Only include fields that need to change. "
+            "DO NOT use this for background gradients, textures, or atmospheric backgrounds — use replace_image with background_style instead."
         ),
         "input_schema": {
             "type": "object",
@@ -338,7 +339,7 @@ TOOLS = [
                     "type": "string",
                     "enum": ["uppercase", "lowercase", "none"],
                 },
-                "color_bg": {"type": "string", "description": "Background color (hex)"},
+                "color_bg": {"type": "string", "description": "Solid background color (hex). Only use for SOLID flat colors (e.g. pure black, white, navy). For gradients, textures, or any visual background — use replace_image with background_style instead."},
                 "color_text": {"type": "string", "description": "Text color (hex)"},
                 "color_accent": {"type": "string", "description": "Accent color (hex)"},
                 "color_subtext": {"type": "string", "description": "Subtext color (hex)"},
@@ -637,7 +638,7 @@ Rules:
   Reference: Red=#DC2626, Orange=#EA580C, Amber=#D97706, Yellow=#EAB308, Lime=#65A30D, Green=#16A34A, Emerald=#059669, Teal=#0D9488, Cyan=#0891B2, Sky=#0284C7, Blue=#2563EB, Indigo=#4F46E5, Violet=#7C3AED, Purple=#9333EA, Fuchsia=#C026D3, Pink=#DB2777, Rose=#E11D48, White=#FFFFFF, Black=#000000, Gray=#6B7280, Beige=#F5F0E8, Navy=#1E3A5F, Burgundy=#800020, Gold=#FFD700, Coral=#FF6B6B, Turquoise=#40E0D0, Peach=#FFCBA4, Lavender=#E6E6FA, Mint=#98FB98, Cream=#FFFDD0, Charcoal=#36454F
 - STOCK PHOTOS: When user asks to "use stock photos", "use real photos", "no AI images", "use actual photos", or anything similar → set image_source="stock" on generate_post. This is CRITICAL. Default is "auto".
 - LANDSCAPE FORMAT: When user asks for "landscape", "16:9", "widescreen", "horizontal" or "can you make it landscape" → set format="landscape" on generate_post. Default is "square".
-- AI BACKGROUND: When user asks for an AI-generated gradient/abstract/textured background (e.g. "orange gradient background made with AI", "dark abstract bg", "warm amber texture") → call replace_image with background_style set to a detailed description. Do NOT use CSS colors for this — the user explicitly wants AI-generated visuals.
+- BACKGROUND CHANGES: Whenever the user asks to change the background to ANYTHING visual — gradient, warm tone, orange, dark, abstract, texture, glow, moody, cinematic, etc. — call replace_image with background_style describing the visual in detail (e.g. "rich warm orange gradient, smooth, no text, abstract glow"). NEVER use edit_post color_bg for gradients or atmospheric backgrounds. color_bg is ONLY for flat solid colors (pure black, white, navy). This applies even if the user does NOT say "AI" — the default is ALWAYS AI-generated backgrounds for any non-solid request.
 - INSPIRATION POSTS: When user sends an image and says "make a post like this", "similar to this one", "based on this" → set use_last_inspiration=true on generate_post. This makes the template replicate the layout of THAT specific image. Do NOT set this for normal posts.
 - CLIENT RULES: When user says "never use X for client", "always use Y for client", "client should not have Z" → call save_client_rule to permanently store this. Do this IN ADDITION to any other action (like generating a new post). Example: "never use orange for Georgoulis" → save_client_rule + generate_post.
 - DESIGN SCOUT: When user asks to find fresh designs, inspiration, or specific styles, call scout_designs. Always set the focus field from what they say — e.g. "find me dark luxury posts" → focus="dark luxury editorial", "look for minimal health brand posts" → focus="minimal health brand", "something with bold typography" → focus="bold typography". If there are pending scout results, watch for the user's approval reply.
