@@ -109,4 +109,5 @@ class PipelineResult:
     extra_images: Optional[list] = None
     template_html: str = ""
     logo_b64: Optional[str] = None
+    reference_elements: Optional[list] = None  # Photo prompts from decomposition — for later edits
     error: str = ""

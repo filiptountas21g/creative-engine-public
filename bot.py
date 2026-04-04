@@ -724,6 +724,37 @@ def _build_system_prompt(user_id: int) -> str:
             f"  Has logo: {'yes' if post_data.get('logo_b64') else 'no'}\n"
         )
 
+        # If post was generated from a reference, show the element descriptions
+        # so Claude knows what was in the inspiration (e.g. "woman portrait", "gear icon")
+        ref_elements = post_data.get("reference_elements")
+        if ref_elements:
+            elem_lines = []
+            for elem in ref_elements:
+                slot = elem.get("slot", "?")
+                desc = elem.get("description", elem.get("prompt", "?"))
+                sourcing = elem.get("sourcing", "ai_photo")
+                is_bg = elem.get("is_background", False)
+                role = "background" if is_bg else f"IMAGE_{slot}"
+                elem_lines.append(f"    {role}: {desc}")
+            post_context += (
+                f"\n  Reference elements (from inspiration image — use these descriptions for add_image_prompt):\n"
+                + "\n".join(elem_lines) + "\n"
+            )
+
+        # Also include taste analysis summary if available
+        analysis = _last_analysis_by_user.get(user_id)
+        if analysis and not ref_elements:
+            comp = analysis.get("composition", {})
+            feeling = analysis.get("feeling", {})
+            what_works = analysis.get("what_makes_it_work", "")
+            if comp or what_works:
+                post_context += (
+                    f"\n  Inspiration analysis (what the user sent):\n"
+                    f"    Composition: {comp.get('template_match', '?')}, {comp.get('text_position', '?')} text\n"
+                    f"    Mood: {feeling.get('mood', '?')}\n"
+                    f"    What works: {what_works[:150]}\n"
+                )
+
     has_pending_scout = user_id in _pending_scout
     scout_context = ""
     if has_pending_scout:
@@ -1136,6 +1167,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
                 "rendered_path": result.image_path,
                 "extra_images": result.extra_images,
                 "canvas_format": canvas_format,
+                "reference_elements": result.reference_elements,
             }
             _last_post_by_user[user_id] = post_data
             _remember(user_id, "post", post_data, label=f"{client_name}: {result.decisions.headline[:40]}")
