@@ -72,6 +72,91 @@ _previous_decisions: dict[int, list[dict]] = {}
 # Pending scout results awaiting user approval
 _pending_scout: dict[int, dict] = {}
 
+# Track which users have been restored from DB this session
+_restored_users: set[int] = set()
+
+
+def _persist_user_reference(user_id: int):
+    """Save the user's last reference analysis + image to Brain (survives restarts)."""
+    if user_id not in _last_analysis_by_user:
+        return
+    try:
+        data = _last_analysis_by_user[user_id].copy()
+        # Store as JSON — _image_b64 included (typically 100-300KB)
+        brain.store(
+            topic="user_session_reference",
+            source=str(user_id),
+            content=json.dumps(data, default=str),
+            summary=f"Last reference for user {user_id}",
+            tags=["session", "reference", str(user_id)],
+        )
+        logger.info(f"[persist] Saved reference for user {user_id} ({len(data.get('_image_b64', '')) // 1024}KB image)")
+    except Exception as e:
+        logger.warning(f"[persist] Failed to save reference: {e}")
+
+
+def _persist_chat_history(user_id: int):
+    """Save the user's chat history to Brain (survives restarts)."""
+    hist = _chat_history.get(user_id, [])
+    if not hist:
+        return
+    try:
+        # Only persist last 10 messages to keep it small
+        # Strip image content blocks (too large) — keep text and tool calls only
+        slim_hist = []
+        for msg in hist[-10:]:
+            if isinstance(msg.get("content"), str):
+                slim_hist.append(msg)
+            elif isinstance(msg.get("content"), list):
+                slim_blocks = []
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "image":
+                        continue  # skip image blocks — too large
+                    slim_blocks.append(block)
+                if slim_blocks:
+                    slim_hist.append({"role": msg["role"], "content": slim_blocks})
+
+        brain.store(
+            topic="user_session_chat",
+            source=str(user_id),
+            content=json.dumps(slim_hist, default=str),
+            summary=f"Chat history for user {user_id} ({len(slim_hist)} messages)",
+            tags=["session", "chat", str(user_id)],
+        )
+        logger.info(f"[persist] Saved chat history for user {user_id} ({len(slim_hist)} messages)")
+    except Exception as e:
+        logger.warning(f"[persist] Failed to save chat history: {e}")
+
+
+def _restore_user_session(user_id: int):
+    """Restore user's reference analysis and chat history from Brain after restart."""
+    if user_id in _restored_users:
+        return  # Already restored this session
+    _restored_users.add(user_id)
+
+    # Restore reference analysis
+    if user_id not in _last_analysis_by_user:
+        try:
+            refs = brain.query(topic="user_session_reference", source=str(user_id), limit=1)
+            if refs:
+                data = json.loads(refs[0]["content"])
+                _last_analysis_by_user[user_id] = data
+                has_image = bool(data.get("_image_b64"))
+                logger.info(f"[restore] Restored reference for user {user_id} (has_image={has_image})")
+        except Exception as e:
+            logger.warning(f"[restore] Failed to restore reference: {e}")
+
+    # Restore chat history
+    if user_id not in _chat_history or not _chat_history[user_id]:
+        try:
+            chats = brain.query(topic="user_session_chat", source=str(user_id), limit=1)
+            if chats:
+                hist = json.loads(chats[0]["content"])
+                _chat_history[user_id] = hist
+                logger.info(f"[restore] Restored chat history for user {user_id} ({len(hist)} messages)")
+        except Exception as e:
+            logger.warning(f"[restore] Failed to restore chat history: {e}")
+
 # ── Sliding conversation memory ─────────────────────────
 # Keeps recent posts and analyses available for ~15 messages, auto-prunes
 MEMORY_TTL_MESSAGES = 15
@@ -142,6 +227,9 @@ def _add_to_history(user_id: int, role: str, content):
     _chat_history[user_id].append({"role": role, "content": content})
     # Trim but never split tool_use/tool_result pairs
     _trim_history(user_id)
+    # Persist every 3 messages (not every message — too many DB writes)
+    if len(_chat_history[user_id]) % 3 == 0:
+        _persist_chat_history(user_id)
 
 
 def _trim_history(user_id: int):
@@ -657,6 +745,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     photo = msg.photo[-1]
     caption = msg.caption or ""
     user_id = msg.from_user.id if msg.from_user else 0
+    _restore_user_session(user_id)
     _bump_message_counter(user_id)
     history_text = _get_history_text_simple(user_id)
 
@@ -709,6 +798,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             _last_analysis_by_user[user_id]["_image_b64"] = img_b64
         except Exception:
             pass
+        # Persist to DB so it survives restarts
+        _persist_user_reference(user_id)
         _remember(user_id, "analysis", analysis, label=analysis.get("summary", caption or "inspiration image")[:60])
         _add_to_history(user_id, "user", f"[sent inspiration photo] {caption}")
         _add_to_history(user_id, "assistant", analysis_text[:300])
@@ -1894,6 +1985,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = msg.text.strip()
     user_id = msg.from_user.id if msg.from_user else 0
     logger.info(f"[text] Received from {user_id}: {text[:80]}")
+
+    # Restore session from DB if this is first message after restart
+    _restore_user_session(user_id)
 
     _bump_message_counter(user_id)
     _add_to_history(user_id, "user", text)
