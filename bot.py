@@ -76,22 +76,35 @@ _pending_scout: dict[int, dict] = {}
 _restored_users: set[int] = set()
 
 
+MAX_SAVED_REFERENCES = 5  # keep last 5 references per user (~1MB total)
+
+
 def _persist_user_reference(user_id: int):
     """Save the user's last reference analysis + image to Brain (survives restarts).
-    Deletes old entry first — only 1 row per user ever exists."""
+    Keeps last 5 per user — prunes older ones."""
     if user_id not in _last_analysis_by_user:
         return
     try:
         data = _last_analysis_by_user[user_id].copy()
-        # Delete old entry first — keeps exactly 1 row per user
-        brain.delete_by_topic_source("user_session_reference", str(user_id))
+        # Give it a short label from the analysis for identification
+        label = data.get("feeling", {}).get("mood", "") or data.get("composition", {}).get("template_match", "")
         brain.store(
             topic="user_session_reference",
             source=str(user_id),
             content=json.dumps(data, default=str),
-            summary=f"Last reference for user {user_id}",
+            summary=f"{label[:40]}" if label else "reference",
             tags=["session", "reference", str(user_id)],
         )
+        # Prune old references beyond MAX_SAVED_REFERENCES
+        existing = brain.query(topic="user_session_reference", source=str(user_id), limit=MAX_SAVED_REFERENCES + 10)
+        if len(existing) > MAX_SAVED_REFERENCES:
+            # Delete the oldest ones (query returns newest first)
+            for old in existing[MAX_SAVED_REFERENCES:]:
+                try:
+                    brain._execute("DELETE FROM brain_entries WHERE id = ?", [old["id"]])
+                except Exception:
+                    pass
+            logger.info(f"[persist] Pruned {len(existing) - MAX_SAVED_REFERENCES} old references for user {user_id}")
         logger.info(f"[persist] Saved reference for user {user_id} ({len(data.get('_image_b64', '')) // 1024}KB image)")
     except Exception as e:
         logger.warning(f"[persist] Failed to save reference: {e}")
@@ -139,7 +152,7 @@ def _restore_user_session(user_id: int):
         return  # Already restored this session
     _restored_users.add(user_id)
 
-    # Restore reference analysis
+    # Restore latest reference analysis
     if user_id not in _last_analysis_by_user:
         try:
             refs = brain.query(topic="user_session_reference", source=str(user_id), limit=1)
@@ -147,7 +160,9 @@ def _restore_user_session(user_id: int):
                 data = json.loads(refs[0]["content"])
                 _last_analysis_by_user[user_id] = data
                 has_image = bool(data.get("_image_b64"))
-                logger.info(f"[restore] Restored reference for user {user_id} (has_image={has_image})")
+                # Count total saved references
+                all_refs = brain.query(topic="user_session_reference", source=str(user_id), limit=MAX_SAVED_REFERENCES)
+                logger.info(f"[restore] Restored reference for user {user_id} (has_image={has_image}, {len(all_refs)} saved total)")
         except Exception as e:
             logger.warning(f"[restore] Failed to restore reference: {e}")
 
