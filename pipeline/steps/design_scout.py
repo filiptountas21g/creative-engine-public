@@ -487,9 +487,9 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
     base_query = f"{base} brand campaign post".strip()
 
     queries = [
-        (f"site:behance.net {base_query} {style_keywords} 2025", "Behance campaigns"),
-        (f"site:dribbble.com {base_query} {style_keywords}", "Dribbble shots"),
-        (f"site:pinterest.com {base_query} {style_keywords}", "Pinterest pins"),
+        (f"site:behance.net {base_query} {style_keywords} 2025", "Behance"),
+        (f"site:behance.net {base_query} {style_keywords} 2024", "Behance 2024"),
+        (f"site:dribbble.com {base_query} {style_keywords}", "Dribbble"),
     ]
 
     if avoid_hint:
@@ -520,6 +520,8 @@ HARD_BLOCKED_DOMAINS = {
     "instagram.com", "cdninstagram.com",
     # YouTube thumbnails are not design inspiration
     "ytimg.com", "youtube.com",
+    # Pinterest disabled for now — too noisy, focus on Behance + Dribbble only
+    "pinterest.com", "pinimg.com", "pinterest.co.uk", "pinterest.fr",
 }
 
 
