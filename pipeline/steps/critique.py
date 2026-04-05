@@ -242,3 +242,169 @@ def format_critique_for_fix(critique: dict) -> str:
     lines.append(f"\nOVERALL: {critique.get('overall', '')}")
 
     return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════
+# COPY-MODE COMPARISON — visual diff, not aesthetic judgment
+# ══════════════════════════════════════════════════════════════
+
+COMPARISON_SYSTEM = """You are a visual QA engineer comparing a rendered HTML reproduction against its reference design.
+
+You receive TWO images:
+- IMAGE A: The original reference design (the target)
+- IMAGE B: The rendered reproduction (what was produced)
+
+Your job: identify EVERY visual difference between A and B.
+You are NOT judging quality, aesthetics, or whether this is a good design.
+You are ONLY finding differences — like a visual diff tool.
+
+Focus on:
+1. MISSING ELEMENTS — things in the reference that are not in the render
+2. EXTRA ELEMENTS — things in the render that are not in the reference
+3. POSITION ERRORS — elements that exist in both but are in different positions
+4. SIZE ERRORS — elements that are the wrong size relative to the reference
+5. COLOR DIFFERENCES — only if the color ROLE is wrong (dark where light should be, accent where background should be). The reproduction intentionally uses different brand colors, so don't flag color changes that preserve the same visual role.
+6. SPACING ISSUES — gaps between elements that differ significantly
+7. TYPOGRAPHY — font weight, size, or case that looks visibly different
+
+DO NOT comment on:
+- Whether the design is "good" or "professional"
+- Whether it works as a social media post
+- Aesthetic preferences or suggestions for improvement
+- Anything that isn't a factual difference between the two images
+
+Return ONLY valid JSON:
+{
+  "similarity_pct": 0-100,
+  "differences": [
+    {
+      "category": "missing_element | extra_element | wrong_position | wrong_size | wrong_color | wrong_spacing | wrong_typography",
+      "what": "the specific element",
+      "in_reference": "what it looks like in the reference",
+      "in_render": "what it looks like in the render (or 'absent')",
+      "fix": "specific CSS/HTML fix instruction"
+    }
+  ],
+  "summary": "1 sentence — the single most important difference to fix"
+}
+
+If the images are very similar (similarity 85+), return an empty differences array."""
+
+
+async def compare_to_reference(
+    rendered_png_path: str,
+    reference_image_b64: str,
+    iteration: int = 1,
+) -> dict:
+    """
+    Compare a rendered output to the reference image. Pure visual diff.
+    No aesthetic judgment — just finding differences.
+    """
+    import json
+
+    # Load rendered PNG
+    rendered_path = Path(rendered_png_path)
+    rendered_b64 = base64.b64encode(rendered_path.read_bytes()).decode("utf-8")
+
+    # Detect reference media type
+    try:
+        raw = base64.b64decode(reference_image_b64[:32])
+        if raw[:4] == b'RIFF' or b'WEBP' in raw[:12]:
+            ref_media = "image/webp"
+        elif raw[:8] == b'\x89PNG\r\n\x1a\n':
+            ref_media = "image/png"
+        else:
+            ref_media = "image/jpeg"
+    except Exception:
+        ref_media = "image/jpeg"
+
+    message_content = [
+        {"type": "text", "text": "IMAGE A — THE REFERENCE DESIGN (this is the target to match):"},
+        {"type": "image", "source": {"type": "base64", "media_type": ref_media, "data": reference_image_b64}},
+        {"type": "text", "text": f"IMAGE B — YOUR RENDERED REPRODUCTION (iteration {iteration}):"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": rendered_b64}},
+        {"type": "text", "text": "List every difference between IMAGE A and IMAGE B. Be exhaustive but focus on structural differences, not minor pixel variations."},
+    ]
+
+    try:
+        response = _client.messages.create(
+            model=config.VISION_MODEL,
+            max_tokens=1500,
+            system=COMPARISON_SYSTEM,
+            messages=[{"role": "user", "content": message_content}],
+        )
+
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+        result = json.loads(text)
+        n_diffs = len(result.get("differences", []))
+        sim = result.get("similarity_pct", 0)
+        logger.info(f"Comparison (iter {iteration}): {sim}% similar, {n_diffs} differences")
+        if result.get("summary"):
+            logger.info(f"  → {result['summary']}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Comparison failed: {e}")
+        return {"similarity_pct": 50, "differences": [], "summary": f"Comparison error: {e}"}
+
+
+def needs_copy_revision(comparison: dict) -> bool:
+    """Check if a copy-mode render needs revision based on comparison."""
+    sim = comparison.get("similarity_pct", 0)
+    diffs = comparison.get("differences", [])
+
+    # Good enough — stop
+    if sim >= 85 and not diffs:
+        return False
+
+    # Missing elements are the most important to fix
+    missing = [d for d in diffs if d.get("category") == "missing_element"]
+    if missing:
+        logger.info(f"Copy revision needed: {len(missing)} missing elements")
+        return True
+
+    # Low similarity — fix
+    if sim < 75:
+        logger.info(f"Copy revision needed: similarity {sim}% < 75%")
+        return True
+
+    # Some differences but high similarity — acceptable
+    if sim >= 85:
+        return False
+
+    # Medium similarity with differences — fix
+    if diffs:
+        logger.info(f"Copy revision needed: {len(diffs)} differences, {sim}% similar")
+        return True
+
+    return False
+
+
+def format_comparison_for_fix(comparison: dict) -> str:
+    """Format comparison differences into fix instructions for Opus."""
+    diffs = comparison.get("differences", [])
+    if not diffs:
+        return ""
+
+    lines = ["COMPARISON TO REFERENCE — fix these differences:\n"]
+
+    for d in diffs:
+        category = d.get("category", "difference").upper().replace("_", " ")
+        lines.append(
+            f"[{category}] {d.get('what', '?')}\n"
+            f"  Reference: {d.get('in_reference', '?')}\n"
+            f"  Your render: {d.get('in_render', '?')}\n"
+            f"  → Fix: {d.get('fix', 'Match the reference')}\n"
+        )
+
+    summary = comparison.get("summary", "")
+    if summary:
+        lines.append(f"\nPRIORITY: {summary}")
+
+    return "\n".join(lines)

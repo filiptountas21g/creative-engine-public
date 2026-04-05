@@ -19,7 +19,7 @@ from pipeline.steps.image_gen import generate_image, generate_extra_images
 from pipeline.steps.decisions import creative_decisions
 from pipeline.steps.render import render
 from pipeline.steps.dynamic_template import generate_dynamic_template, get_client_preferences, fix_template_from_critique
-from pipeline.steps.critique import critique_render, needs_revision, format_critique_for_fix
+from pipeline.steps.critique import critique_render, needs_revision, format_critique_for_fix, compare_to_reference, needs_copy_revision, format_comparison_for_fix
 from pipeline.steps.brain_write import brain_write
 from pipeline.steps.design_scout import (
     extract_layout_tags, store_layout_tags, detect_staleness,
@@ -374,12 +374,41 @@ async def run_pipeline(
         current_html = dynamic_html
 
         if is_copy_mode:
-            # COPY MODE: Skip critique entirely — it judges by "social media post" standards
-            # and destroys complex layouts (dashboards, glassmorphism, etc.) thinking they're bugs.
-            # The template was built from the reference decomposition — render once and deliver.
-            await _notify("render", "Rendering final PNG (copy mode — no critique)...")
-            render_result = await render(decisions, image, input.client, dynamic_html=current_html, logo_b64=logo_b64, extra_images=extra_images, canvas_format=getattr(input, "format", "square"))
-            logger.info("Copy mode — skipping critique loop to preserve reference layout")
+            # COPY MODE: Comparison loop — visual diff against reference, not aesthetic judgment
+            COPY_MAX_REVISIONS = 1
+            reference_b64 = forced_reference["_image_b64"]
+            canvas_fmt = getattr(input, "format", "square")
+
+            for iteration in range(1, COPY_MAX_REVISIONS + 2):
+                await _notify("render", f"Rendering PNG{f' (revision {iteration - 1})' if iteration > 1 else ''}...")
+                render_result = await render(decisions, image, input.client, dynamic_html=current_html, logo_b64=logo_b64, extra_images=extra_images, canvas_format=canvas_fmt)
+
+                if iteration > COPY_MAX_REVISIONS:
+                    break
+
+                # Compare render to reference — pure visual diff
+                await _notify("critique", f"Comparing to reference (pass {iteration})...")
+                comparison = await compare_to_reference(
+                    render_result.final_image_path,
+                    reference_b64,
+                    iteration=iteration,
+                )
+                sim = comparison.get("similarity_pct", 0)
+                n_diffs = len(comparison.get("differences", []))
+
+                if not needs_copy_revision(comparison):
+                    await _notify("critique", f"✓ Good match ({sim}% similar)")
+                    logger.info(f"Copy comparison passed: {sim}% similar, {n_diffs} differences")
+                    break
+
+                # Fix differences
+                fix_text = format_comparison_for_fix(comparison)
+                await _notify("fix", f"Fixing {n_diffs} differences ({sim}% similar)...")
+                current_html = await fix_template_from_critique(
+                    current_html, fix_text, decisions,
+                    reference_image_b64=reference_b64,
+                )
+                logger.info(f"Copy fix applied (iteration {iteration}), re-rendering...")
         else:
             # NORMAL MODE: Critique → Fix loop (max 2 revision passes)
             MAX_REVISIONS = 2
