@@ -313,6 +313,57 @@ def _restore_user_post(user_id: int):
         logger.warning(f"[restore] Failed to restore post: {e}")
 
 
+def _sanitize_chat_history(hist: list[dict]) -> list[dict]:
+    """Clean up restored chat history to prevent API errors.
+    Ensures every tool_use has a matching tool_result, and strips orphaned ones."""
+    if not hist:
+        return hist
+
+    clean = []
+    for i, msg in enumerate(hist):
+        # Check if this message contains tool_use blocks
+        has_tool_use = False
+        if msg.get("role") == "assistant":
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                has_tool_use = any(
+                    isinstance(block, dict) and block.get("type") == "tool_use"
+                    for block in content
+                )
+
+        if has_tool_use:
+            # Check if the NEXT message is a tool_result
+            next_msg = hist[i + 1] if i + 1 < len(hist) else None
+            has_matching_result = False
+            if next_msg and next_msg.get("role") == "user":
+                next_content = next_msg.get("content", [])
+                if isinstance(next_content, list):
+                    has_matching_result = any(
+                        isinstance(block, dict) and block.get("type") == "tool_result"
+                        for block in next_content
+                    )
+
+            if not has_matching_result:
+                # Strip: tool_use without tool_result — would crash the API
+                logger.warning(f"[sanitize] Dropping orphaned tool_use message at index {i}")
+                continue
+
+        clean.append(msg)
+
+    # Also strip any trailing tool_result without a preceding tool_use
+    while clean and clean[-1].get("role") == "user":
+        content = clean[-1].get("content", [])
+        if isinstance(content, list) and all(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+        ):
+            logger.warning("[sanitize] Dropping trailing orphaned tool_result")
+            clean.pop()
+        else:
+            break
+
+    return clean
+
+
 def _restore_user_session(user_id: int):
     """Restore user's reference analysis and chat history from Brain after restart."""
     if user_id in _restored_users:
@@ -339,6 +390,9 @@ def _restore_user_session(user_id: int):
             chats = brain.query(topic="user_session_chat", source=str(user_id), limit=1)
             if chats:
                 hist = json.loads(chats[0]["content"])
+                # Validate: strip trailing tool_use without matching tool_result
+                # The API requires every tool_use to have a tool_result immediately after
+                hist = _sanitize_chat_history(hist)
                 _chat_history[user_id] = hist
                 logger.info(f"[restore] Restored chat history for user {user_id} ({len(hist)} messages)")
         except Exception as e:
