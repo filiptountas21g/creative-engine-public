@@ -44,6 +44,7 @@ async def generate_image(
     concept: CreativeConcept,
     brain_ctx: BrainContext,
     image_source: str = "auto",
+    slot_id: int | None = None,
 ) -> ImageResult:
     """
     Source the best image for this concept.
@@ -52,14 +53,19 @@ async def generate_image(
       "auto" — tries stock first, falls back to AI (default)
       "stock" — stock photos only, lower quality threshold, no AI fallback
       "ai" — AI generation only, skip stock search
+
+    slot_id:
+      When generating multiple images (e.g. per-slot from decomposition),
+      pass the slot number (1, 2, 3...) so each image gets a unique filename.
+      Without this, all images save to hero_temp.png and overwrite each other.
     """
     taste = brain_ctx.taste_context
 
-    logger.info(f"Image generation starting: image_source={image_source}")
+    logger.info(f"Image generation starting: image_source={image_source}, slot_id={slot_id}")
 
     if image_source == "ai":
         logger.info("AI-only mode — skipping stock search")
-        return await _generate_ai_image(concept, taste)
+        return await _generate_ai_image(concept, taste, slot_id=slot_id)
 
     # Try stock photos if APIs are available
     has_unsplash = bool(config.UNSPLASH_ACCESS_KEY)
@@ -71,13 +77,13 @@ async def generate_image(
             # Lower the bar for stock-only mode
             is_stock_mode = image_source == "stock"
             logger.info(f"Searching stock photos (lenient={is_stock_mode})...")
-            stock_result = await _try_stock_photos(concept, taste, lenient=is_stock_mode)
+            stock_result = await _try_stock_photos(concept, taste, lenient=is_stock_mode, slot_id=slot_id)
             if stock_result:
                 logger.info(f"✓ Stock photo accepted: {stock_result.model_used}")
                 return stock_result
             if is_stock_mode:
                 logger.warning("Stock-only mode — first search failed, trying broader search...")
-                stock_result = await _try_stock_photos_broad(concept, taste)
+                stock_result = await _try_stock_photos_broad(concept, taste, slot_id=slot_id)
                 if stock_result:
                     logger.info(f"✓ Broad stock search found: {stock_result.model_used}")
                     return stock_result
@@ -92,12 +98,12 @@ async def generate_image(
 
     # Fallback: AI generation
     logger.info("Generating AI image...")
-    return await _generate_ai_image(concept, taste)
+    return await _generate_ai_image(concept, taste, slot_id=slot_id)
 
 
 # ── Stock photo pipeline ──────────────────────────────────
 
-async def _try_stock_photos(concept: CreativeConcept, taste: dict, lenient: bool = False) -> ImageResult | None:
+async def _try_stock_photos(concept: CreativeConcept, taste: dict, lenient: bool = False, slot_id: int | None = None) -> ImageResult | None:
     """Search stock photos, judge them with Claude Vision, return best or None.
     If lenient=True, accept medium/low confidence and be less strict about exact concept match."""
 
@@ -158,7 +164,8 @@ async def _try_stock_photos(concept: CreativeConcept, taste: dict, lenient: bool
 
         output_dir = Path(config.OUTPUT_DIR)
         output_dir.mkdir(parents=True, exist_ok=True)
-        img_path = output_dir / "hero_temp.png"
+        filename = f"hero_temp_{slot_id}.png" if slot_id else "hero_temp.png"
+        img_path = output_dir / filename
         img_path.write_bytes(resp.content)
 
         logger.info(f"Stock photo saved: {img_path} (source: {best['source']})")
@@ -171,7 +178,7 @@ async def _try_stock_photos(concept: CreativeConcept, taste: dict, lenient: bool
         )
 
 
-async def _try_stock_photos_broad(concept: CreativeConcept, taste: dict) -> ImageResult | None:
+async def _try_stock_photos_broad(concept: CreativeConcept, taste: dict, slot_id: int | None = None) -> ImageResult | None:
     """Broader stock search as a second attempt — uses simpler, more generic queries."""
     # Extract the core subject/mood as simpler search terms
     simple_queries = [
@@ -212,7 +219,8 @@ async def _try_stock_photos_broad(concept: CreativeConcept, taste: dict) -> Imag
         resp.raise_for_status()
         output_dir = Path(config.OUTPUT_DIR)
         output_dir.mkdir(parents=True, exist_ok=True)
-        img_path = output_dir / "hero_temp.png"
+        filename = f"hero_temp_{slot_id}.png" if slot_id else "hero_temp.png"
+        img_path = output_dir / filename
         img_path.write_bytes(resp.content)
         logger.info(f"Broad stock search found: {img_path} (source: {best['source']})")
         return ImageResult(
@@ -452,7 +460,7 @@ Return ONLY valid JSON:
 }"""
 
 
-async def _generate_ai_image(concept: CreativeConcept, taste: dict) -> ImageResult:
+async def _generate_ai_image(concept: CreativeConcept, taste: dict, slot_id: int | None = None) -> ImageResult:
     """Generate image with AI (Flux or Ideogram) — the original pipeline."""
 
     user_msg = f"""Write an image generation prompt for this concept.
@@ -500,16 +508,16 @@ IMPORTANT: Do NOT include any text in the prompt. The template system handles al
 
     # Generate the image
     if model == "flux2" and config.FAL_KEY:
-        return await _generate_flux(prompt, negative, spec)
+        return await _generate_flux(prompt, negative, spec, slot_id=slot_id)
     elif config.IDEOGRAM_API_KEY:
-        return await _generate_ideogram(prompt, spec)
+        return await _generate_ideogram(prompt, spec, slot_id=slot_id)
     elif config.FAL_KEY:
-        return await _generate_flux(prompt, negative, spec)
+        return await _generate_flux(prompt, negative, spec, slot_id=slot_id)
     else:
         raise ValueError("No image generation API key set (need FAL_KEY or IDEOGRAM_API_KEY)")
 
 
-async def _generate_flux(prompt: str, negative: str, spec: dict) -> ImageResult:
+async def _generate_flux(prompt: str, negative: str, spec: dict, slot_id: int | None = None) -> ImageResult:
     """Generate image with Flux 2 via fal.ai."""
     if not config.FAL_KEY:
         raise ValueError("FAL_KEY not set — cannot generate Flux images")
@@ -550,10 +558,11 @@ async def _generate_flux(prompt: str, negative: str, spec: dict) -> ImageResult:
 
         output_dir = Path(config.OUTPUT_DIR)
         output_dir.mkdir(parents=True, exist_ok=True)
-        img_path = output_dir / "hero_temp.png"
+        filename = f"hero_temp_{slot_id}.png" if slot_id else "hero_temp.png"
+        img_path = output_dir / filename
         img_path.write_bytes(img_response.content)
 
-        logger.info(f"Flux image saved: {img_path}")
+        logger.info(f"Flux image saved: {img_path} (slot={slot_id})")
 
         return ImageResult(
             image_path=str(img_path),
@@ -800,7 +809,7 @@ async def _judge_stock_photos_batch(
         return []
 
 
-async def _generate_ideogram(prompt: str, spec: dict) -> ImageResult:
+async def _generate_ideogram(prompt: str, spec: dict, slot_id: int | None = None) -> ImageResult:
     """Generate image with Ideogram 3 API."""
     ASPECT_MAP = {
         "1:1": "ASPECT_1_1",
@@ -846,10 +855,11 @@ async def _generate_ideogram(prompt: str, spec: dict) -> ImageResult:
 
         output_dir = Path(config.OUTPUT_DIR)
         output_dir.mkdir(parents=True, exist_ok=True)
-        img_path = output_dir / "hero_temp.png"
+        filename = f"hero_temp_{slot_id}.png" if slot_id else "hero_temp.png"
+        img_path = output_dir / filename
         img_path.write_bytes(img_response.content)
 
-        logger.info(f"Ideogram image saved: {img_path}")
+        logger.info(f"Ideogram image saved: {img_path} (slot={slot_id})")
 
         return ImageResult(
             image_path=str(img_path),

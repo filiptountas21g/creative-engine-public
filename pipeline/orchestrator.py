@@ -332,7 +332,7 @@ async def run_pipeline(
                         what_to_avoid="text, logos, watermarks",
                     )
                     await _notify("image", f"Image {slot}: {desc}...")
-                    slot_image = await generate_image(slot_concept, brain_ctx, image_source=src)
+                    slot_image = await generate_image(slot_concept, brain_ctx, image_source=src, slot_id=slot)
 
                     if slot == 1:
                         image = slot_image
