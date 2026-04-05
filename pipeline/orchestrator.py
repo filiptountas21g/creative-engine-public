@@ -406,10 +406,19 @@ async def run_pipeline(
                 # Fix differences
                 fix_text = format_comparison_for_fix(comparison)
                 await _notify("fix", f"Fixing {n_diffs} differences ({sim}% similar)...")
-                current_html = await fix_template_from_critique(
+                fixed_html = await fix_template_from_critique(
                     current_html, fix_text, decisions,
                     reference_image_b64=reference_b64,
                 )
+
+                # Verify the fix didn't strip image placeholders
+                had_images = bool(re.search(r'\{\{IMAGE_\d+\}\}', current_html))
+                has_images = bool(re.search(r'\{\{IMAGE_\d+\}\}', fixed_html))
+                if had_images and not has_images:
+                    logger.warning("Copy fix stripped image placeholders — rejecting fix")
+                    await _notify("fix", "Fix rejected (would remove images)")
+                    break  # Skip re-render, use last good render
+                current_html = fixed_html
                 logger.info(f"Copy fix applied (iteration {iteration}), re-rendering...")
         else:
             # NORMAL MODE: Critique → Fix loop (max 2 revision passes)

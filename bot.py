@@ -1679,6 +1679,28 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
                 reference_image_b64=reference_image_b64,
             )
 
+        # Safety net: if template lost image placeholders but we have images, re-inject them
+        import re as _re
+        _existing_slots = set(_re.findall(r'\{\{IMAGE_(\d+)\}\}', template_html or ""))
+        _total_images = 1 + len(extra_images) if image else len(extra_images)
+        if _total_images > 0 and not _existing_slots:
+            logger.warning(f"[edit] Template has NO image placeholders but {_total_images} images exist — re-injecting")
+            # Build a simple image grid at the bottom
+            _img_tags = []
+            for _i in range(1, _total_images + 1):
+                _img_tags.append(
+                    f'<img src="{{{{IMAGE_{_i}}}}}" style="width:{100//_total_images}%;height:300px;'
+                    f'object-fit:cover;object-position:top center;" alt="photo {_i}">'
+                )
+            _grid_html = (
+                '<div style="position:absolute;bottom:80px;left:40px;right:40px;'
+                'display:flex;gap:16px;z-index:2;">'
+                + "".join(_img_tags)
+                + '</div>'
+            )
+            template_html = template_html.replace("</body>", f"{_grid_html}\n</body>")
+            logger.info(f"[edit] Injected {_total_images} image placeholders into template")
+
         render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64, original_decisions=decisions, extra_images=extra_images or None, canvas_format=canvas_format)
 
         # Build change summary
