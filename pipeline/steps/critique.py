@@ -295,6 +295,7 @@ async def compare_to_reference(
     rendered_png_path: str,
     reference_image_b64: str,
     iteration: int = 1,
+    canvas_format: str = "square",
 ) -> dict:
     """
     Compare a rendered output to the reference image. Pure visual diff.
@@ -318,12 +319,21 @@ async def compare_to_reference(
     except Exception:
         ref_media = "image/jpeg"
 
+    format_note = ""
+    if canvas_format == "landscape":
+        format_note = (
+            "\n\nIMPORTANT: The reproduction was intentionally rendered in LANDSCAPE format (16:9) "
+            "while the reference is square. Do NOT penalize the aspect ratio difference. "
+            "Focus on whether the same ELEMENTS exist and their RELATIVE positions are correct. "
+            "The wider canvas means elements may be spread out more — this is expected."
+        )
+
     message_content = [
         {"type": "text", "text": "IMAGE A — THE REFERENCE DESIGN (this is the target to match):"},
         {"type": "image", "source": {"type": "base64", "media_type": ref_media, "data": reference_image_b64}},
         {"type": "text", "text": f"IMAGE B — YOUR RENDERED REPRODUCTION (iteration {iteration}):"},
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": rendered_b64}},
-        {"type": "text", "text": "List every difference between IMAGE A and IMAGE B. Be exhaustive but focus on structural differences, not minor pixel variations."},
+        {"type": "text", "text": f"List every difference between IMAGE A and IMAGE B. Be exhaustive but focus on structural differences, not minor pixel variations.{format_note}"},
     ]
 
     try:

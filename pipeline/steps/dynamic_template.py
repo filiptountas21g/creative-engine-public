@@ -512,12 +512,13 @@ Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
                 logger.info(f"Fix: replacing hardcoded '{actual_text[:40]}...' with {placeholder}")
                 html = html.replace(actual_text, placeholder, 1)
 
-        # Validate placeholders still present
+        # Validate placeholders still present — if Opus dropped them, REJECT the fix
         has_any_image = "{{IMAGE_PATH}}" in html or "{{IMAGE_1}}" in html
         required = ["{{HEADLINE}}", "{{SUBTEXT}}", "{{CLIENT_NAME}}"]
         missing = [p for p in required if p not in html]
         if missing:
-            logger.warning(f"Fixed template missing placeholders: {missing} — keeping original for those")
+            logger.warning(f"Fixed template missing placeholders: {missing} — REJECTING fix, keeping original")
+            return current_html  # Return the original, not the broken fix
 
         # Post-process hardcoded colors
         import re

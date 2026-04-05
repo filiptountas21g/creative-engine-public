@@ -393,6 +393,7 @@ async def run_pipeline(
                     render_result.final_image_path,
                     reference_b64,
                     iteration=iteration,
+                    canvas_format=canvas_fmt,
                 )
                 sim = comparison.get("similarity_pct", 0)
                 n_diffs = len(comparison.get("differences", []))
