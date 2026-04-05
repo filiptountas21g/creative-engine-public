@@ -146,6 +146,173 @@ def _persist_chat_history(user_id: int):
         logger.warning(f"[persist] Failed to save chat history: {e}")
 
 
+def _persist_user_post(user_id: int):
+    """Save the user's last generated post to Brain (survives restarts).
+    Stores metadata + template in one row, image files in separate rows."""
+    if user_id not in _last_post_by_user:
+        return
+    post_data = _last_post_by_user[user_id]
+
+    try:
+        from dataclasses import asdict
+        import base64 as _b64
+
+        # Build serializable metadata (text only, no large blobs)
+        meta = {
+            "client": post_data.get("client", ""),
+            "canvas_format": post_data.get("canvas_format", "square"),
+            "template_html": post_data.get("template_html", ""),
+            "reference_elements": post_data.get("reference_elements"),
+            "has_reference_image": bool(post_data.get("reference_image_b64")),
+        }
+
+        if post_data.get("decisions"):
+            meta["decisions"] = asdict(post_data["decisions"])
+        if post_data.get("concept"):
+            meta["concept"] = asdict(post_data["concept"])
+
+        # Store metadata (delete old first — 1 row per user)
+        brain.delete_by_topic_source("user_session_post", str(user_id))
+        brain.store(
+            topic="user_session_post",
+            source=str(user_id),
+            content=json.dumps(meta, default=str),
+            summary=f"Post for {meta['client']}: {meta.get('decisions', {}).get('headline', '')[:40]}",
+            tags=["session", "post", str(user_id)],
+        )
+
+        # Store image files as separate entries
+        brain.delete_by_topic_source("user_session_post_images", str(user_id))
+
+        all_images = []
+        if post_data.get("image"):
+            all_images.append(("hero", post_data["image"]))
+        for i, ei in enumerate(post_data.get("extra_images") or []):
+            all_images.append((f"extra_{i+1}", ei))
+
+        for label, img_result in all_images[:4]:  # max 4 images to keep DB reasonable
+            try:
+                img_path = Path(img_result.image_path)
+                if img_path.exists():
+                    img_b64 = _b64.b64encode(img_path.read_bytes()).decode("utf-8")
+                    brain.store(
+                        topic="user_session_post_images",
+                        source=str(user_id),
+                        content=json.dumps({
+                            "label": label,
+                            "image_path": img_result.image_path,
+                            "image_url": getattr(img_result, "image_url", ""),
+                            "model_used": getattr(img_result, "model_used", ""),
+                            "prompt_used": getattr(img_result, "prompt_used", ""),
+                            "bytes_b64": img_b64,
+                        }),
+                        summary=f"{label}: {img_result.image_path}",
+                        tags=["session", "post_image", str(user_id), label],
+                    )
+                    logger.info(f"[persist] Saved {label} image ({len(img_b64)//1024}KB)")
+            except Exception as e:
+                logger.warning(f"[persist] Failed to save {label} image: {e}")
+
+        logger.info(f"[persist] Saved post for user {user_id} ({len(all_images)} images)")
+    except Exception as e:
+        logger.warning(f"[persist] Failed to save post: {e}")
+
+
+def _restore_user_post(user_id: int):
+    """Restore the user's last generated post from Brain after restart.
+    Writes image files back to disk so edits work."""
+    if user_id in _last_post_by_user:
+        return  # Already have a post in memory
+
+    try:
+        posts = brain.query(topic="user_session_post", source=str(user_id), limit=1)
+        if not posts:
+            return
+
+        meta = json.loads(posts[0]["content"])
+
+        # Reconstruct decisions
+        decisions = None
+        if meta.get("decisions"):
+            decisions = CreativeDecisions(**meta["decisions"])
+
+        # Reconstruct concept
+        concept = None
+        if meta.get("concept"):
+            from pipeline.types import CreativeConcept
+            concept = CreativeConcept(**meta["concept"])
+
+        # Restore image files from DB → disk
+        import base64 as _b64
+        img_rows = brain.query(topic="user_session_post_images", source=str(user_id), limit=10)
+
+        hero_image = None
+        extra_images = []
+
+        for img_row in img_rows:
+            try:
+                img_data = json.loads(img_row["content"])
+                label = img_data.get("label", "")
+                img_path = img_data.get("image_path", "")
+                bytes_b64 = img_data.get("bytes_b64", "")
+
+                if bytes_b64 and img_path:
+                    # Write image back to disk
+                    p = Path(img_path)
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_bytes(_b64.b64decode(bytes_b64))
+
+                    img_result = ImageResult(
+                        image_path=img_path,
+                        image_url=img_data.get("image_url", ""),
+                        model_used=img_data.get("model_used", ""),
+                        prompt_used=img_data.get("prompt_used", ""),
+                    )
+
+                    if label == "hero":
+                        hero_image = img_result
+                    else:
+                        extra_images.append(img_result)
+
+                    logger.info(f"[restore] Wrote {label} image to {img_path}")
+            except Exception as e:
+                logger.warning(f"[restore] Failed to restore image: {e}")
+
+        # Reconstruct hero from metadata if file wasn't in DB
+        if not hero_image and meta.get("image"):
+            hero_image = ImageResult(**{k: v for k, v in meta["image"].items() if k in ("image_path", "image_url", "model_used", "prompt_used")})
+
+        # Fetch logo from Brain if post had one
+        logo_b64 = None
+        if meta.get("has_logo", False):
+            from pipeline.orchestrator import _get_client_logo
+            logo_b64 = _get_client_logo(brain, meta.get("client", ""))
+
+        # Get reference image from restored session reference
+        reference_image_b64 = None
+        if meta.get("has_reference_image") and user_id in _last_analysis_by_user:
+            reference_image_b64 = _last_analysis_by_user[user_id].get("_image_b64")
+
+        _last_post_by_user[user_id] = {
+            "decisions": decisions,
+            "image": hero_image,
+            "concept": concept,
+            "client": meta.get("client", ""),
+            "template_html": meta.get("template_html", ""),
+            "logo_b64": logo_b64,
+            "rendered_path": meta.get("rendered_path", ""),
+            "extra_images": extra_images or None,
+            "canvas_format": meta.get("canvas_format", "square"),
+            "reference_elements": meta.get("reference_elements"),
+            "reference_image_b64": reference_image_b64,
+        }
+
+        n_imgs = (1 if hero_image else 0) + len(extra_images)
+        logger.info(f"[restore] Restored post for user {user_id} (client={meta.get('client', '?')}, {n_imgs} images)")
+    except Exception as e:
+        logger.warning(f"[restore] Failed to restore post: {e}")
+
+
 def _restore_user_session(user_id: int):
     """Restore user's reference analysis and chat history from Brain after restart."""
     if user_id in _restored_users:
@@ -176,6 +343,9 @@ def _restore_user_session(user_id: int):
                 logger.info(f"[restore] Restored chat history for user {user_id} ({len(hist)} messages)")
         except Exception as e:
             logger.warning(f"[restore] Failed to restore chat history: {e}")
+
+    # Restore last generated post (must come after reference restore for cross-linking)
+    _restore_user_post(user_id)
 
 # ── Sliding conversation memory ─────────────────────────
 # Keeps recent posts and analyses available for ~15 messages, auto-prunes
@@ -1201,6 +1371,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
             }
             _last_post_by_user[user_id] = post_data
             _remember(user_id, "post", post_data, label=f"{client_name}: {result.decisions.headline[:40]}")
+            _persist_user_post(user_id)
 
             if user_id not in _previous_decisions:
                 _previous_decisions[user_id] = []
@@ -1302,6 +1473,7 @@ async def _exec_generate_carousel(params: dict, user_id: int, msg) -> str:
                 "extra_images": getattr(last, 'extra_images', None),
                 "canvas_format": "square",  # carousels are always square
             }
+            _persist_user_post(user_id)
 
 
     return f"Carousel of {len(successful)} posts generated for {client_name}. Images sent."
@@ -1488,6 +1660,7 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             "extra_images": extra_images,
             "canvas_format": canvas_format,
         }
+        _persist_user_post(user_id)
 
         return f"Post edited. Changes: {changes_text}"
 
@@ -1572,6 +1745,7 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
             "extra_images": extra_images,
             "canvas_format": canvas_format,
         }
+        _persist_user_post(user_id)
 
         return f"Image replaced ({new_image.model_used}). Same layout."
 
@@ -2047,6 +2221,7 @@ async def _exec_generate_from_scout(params: dict, user_id: int, msg) -> str:
                 }
                 _last_post_by_user[user_id] = post_data
                 _remember(user_id, "post", post_data, label=f"{client_name}: {result.decisions.headline[:40]}")
+                _persist_user_post(user_id)
 
                 if user_id not in _previous_decisions:
                     _previous_decisions[user_id] = []
