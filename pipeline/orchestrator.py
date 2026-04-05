@@ -319,7 +319,8 @@ async def run_pipeline(
 
                 for i, pp in enumerate(photo_prompts):
                     slot = pp["slot"]
-                    src = "ai" if pp["is_background"] else image_source
+                    # In copy mode, ALL images use AI — stock can't match the reference
+                    src = "ai" if (is_copy_mode or pp["is_background"]) else image_source
                     desc = pp["description"][:60]
 
                     # Build a concept override with the specific photo prompt
