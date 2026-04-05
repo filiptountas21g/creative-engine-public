@@ -68,6 +68,26 @@ MULTIPLE IMAGES: If the layout needs multiple images (e.g. a grid of speakers, a
   <img src="{{IMAGE_2}}" alt="speaker 2">
   Use multiple images when the reference has multiple photos or when the layout benefits from it.
 
+IMAGE DISPLAY — CRITICAL for multi-photo layouts:
+- Every image container MUST be large enough to show the full subject. If the reference shows
+  portrait photos of people, the container needs enough height to show head + shoulders at minimum.
+- ALWAYS use object-fit: cover; object-position: top center; on portrait/people photos so faces
+  are visible and not cropped from the top.
+- NEVER make image containers so small that photos get cut in half. If 3 photos sit in a row,
+  each container should be at least 200px tall (on a 1080px canvas) — more if the reference shows them larger.
+- Match the IMAGE SIZE from the reference proportionally. If photos take up 40% of the canvas height
+  in the reference, they should take up ~40% in your reproduction.
+- Set overflow: visible on image containers unless you specifically need clipping.
+
+TEXT PROPORTIONALITY — CRITICAL:
+- Match the TEXT SIZES from the reference proportionally. If a label is small (12-16px) in the
+  reference, do NOT make it 60px+ in the reproduction.
+- Names, titles, and labels below photos should be small and clean (14-20px typically), not oversized.
+- Only the main HEADLINE should be large. Secondary text (names, roles, company names, descriptions)
+  should be proportionally smaller, matching the reference hierarchy.
+- All text must fit within its container without overflowing or getting cut off.
+  Use overflow: hidden; text-overflow: ellipsis; or reduce font-size if text is too long.
+
 IMAGE RULES — read carefully:
 - GRADIENT or ABSTRACT BACKGROUND: Do NOT write CSS gradients. Use <img src="{{IMAGE_1}}"> as a full-bleed background (position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; z-index:0). The AI generates the visual. All text/elements go on top (z-index:1+).
 - SUBJECT PHOTO: Use <img src="{{IMAGE_1}}"> normally as the hero image in the layout.
@@ -158,6 +178,19 @@ YOUR JOB:
 5. For text: use {{{{HEADLINE}}}}, {{{{SUBTEXT}}}}, {{{{CTA}}}}, {{{{CLIENT_NAME}}}} placeholders
 6. Match positions precisely — the manifest gives x/y/width/height as percentages
 7. Every decorative element matters — thin lines, dots, arrows, shapes. Build them ALL.
+
+IMAGE SIZING — CRITICAL:
+- Photo containers MUST match the proportional size from the reference/manifest.
+- If the manifest says a photo is 30% of canvas width and 35% of canvas height, make
+  the container EXACTLY that size. Do NOT shrink photos to tiny thumbnails.
+- Use object-fit: cover; object-position: top center; on ALL portrait/people photos
+  so faces show fully and are not cropped from the top.
+- NEVER let images get cut in half — the container must be tall enough to show the subject.
+
+TEXT SIZING — CRITICAL:
+- Secondary text (names, titles, roles, company names) must be proportionally small (14-20px).
+- Only {{{{HEADLINE}}}} should be large. Everything else should match the reference proportions.
+- All text must fit within its container. If it overflows, the font is TOO BIG.
 
 ADAPT ONLY:
 - Replace colors with CSS variables (var(--color-bg), var(--color-text), etc.)
