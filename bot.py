@@ -523,50 +523,104 @@ def _trim_history(user_id: int):
 
 def _get_history_for_api(user_id: int) -> list[dict]:
     """Get conversation history formatted for the Anthropic API.
-    Returns the messages list, ensuring it starts with 'user' role
-    and all tool_result blocks have matching tool_use blocks."""
+    Enforces the API's strict adjacency rules:
+    - Must start with a user message (no tool_results in first message)
+    - Each tool_result must reference a tool_use in the IMMEDIATELY PREVIOUS assistant message
+    - Each assistant tool_use must have a matching tool_result in the IMMEDIATELY NEXT user message
+    - Roles must alternate: user, assistant, user, assistant, ...
+    """
     hist = _chat_history.get(user_id, [])
     if not hist:
         return []
-    # Ensure starts with user message
-    start = 0
-    for i, msg in enumerate(hist):
-        if msg["role"] == "user":
-            start = i
-            break
-    result = hist[start:]
 
-    # Validate tool_use/tool_result pairing — collect all tool_use IDs,
-    # then strip any tool_result that references a missing tool_use
-    tool_use_ids = set()
-    for msg in result:
-        if msg["role"] == "assistant" and isinstance(msg.get("content"), list):
-            for block in msg["content"]:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    tool_use_ids.add(block.get("id"))
-
-    # Filter out orphaned tool_results
+    # Step 1: walk messages pairwise, validate tool_use↔tool_result adjacency
     cleaned = []
-    for msg in result:
-        if msg["role"] == "user" and isinstance(msg.get("content"), list):
-            filtered_blocks = []
-            for block in msg["content"]:
+    for msg in hist:
+        role = msg.get("role")
+        content = msg.get("content", [])
+
+        if role == "user" and isinstance(content, list):
+            # Get tool_use IDs from the immediately previous assistant message
+            prev_tool_use_ids = set()
+            if cleaned and cleaned[-1].get("role") == "assistant":
+                prev_content = cleaned[-1].get("content", [])
+                if isinstance(prev_content, list):
+                    for block in prev_content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
+                            prev_tool_use_ids.add(block["id"])
+
+            # Filter: only keep tool_results that match the previous assistant's tool_use IDs
+            filtered = []
+            for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
-                    if block.get("tool_use_id") not in tool_use_ids:
-                        logger.warning(f"Dropping orphaned tool_result for {block.get('tool_use_id')}")
+                    if block.get("tool_use_id") not in prev_tool_use_ids:
+                        logger.warning(f"[api-sanitize] Dropping tool_result for {block.get('tool_use_id')} — no matching tool_use in previous message")
                         continue
-                filtered_blocks.append(block)
-            if filtered_blocks:
-                cleaned.append({"role": "user", "content": filtered_blocks})
-            # Skip empty messages (all blocks were orphaned)
+                filtered.append(block)
+
+            if not filtered:
+                continue  # skip empty messages
+            cleaned.append({**msg, "content": filtered})
+
+        elif role == "assistant" and isinstance(content, list):
+            # Check if this assistant message has tool_use blocks
+            tool_use_ids_here = set()
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
+                    tool_use_ids_here.add(block["id"])
+
+            # We'll add it now; if the next user message doesn't have matching
+            # tool_results, we'll retroactively strip the tool_use blocks later
+            cleaned.append(msg)
         else:
             cleaned.append(msg)
 
-    # Final check: ensure alternating roles and starts with user
-    if cleaned and cleaned[0]["role"] != "user":
-        cleaned = cleaned[1:]
+    # Step 2: retroactively strip assistant tool_use blocks without matching next tool_results
+    final = []
+    for i, msg in enumerate(cleaned):
+        if msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
+            tool_use_ids = {
+                b["id"] for b in msg["content"]
+                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")
+            }
+            if tool_use_ids:
+                # Check the next message for matching tool_results
+                next_msg = cleaned[i + 1] if i + 1 < len(cleaned) else None
+                next_result_ids = set()
+                if next_msg and next_msg.get("role") == "user" and isinstance(next_msg.get("content"), list):
+                    for b in next_msg["content"]:
+                        if isinstance(b, dict) and b.get("type") == "tool_result":
+                            next_result_ids.add(b.get("tool_use_id"))
+                orphan_ids = tool_use_ids - next_result_ids
+                if orphan_ids:
+                    # Strip orphaned tool_use blocks from this message
+                    filtered = [
+                        b for b in msg["content"]
+                        if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") in orphan_ids)
+                    ]
+                    if not filtered:
+                        continue  # skip entirely empty assistant message
+                    msg = {**msg, "content": filtered}
+        final.append(msg)
 
-    return cleaned
+    # Step 3: ensure starts with user, alternating roles
+    while final and final[0].get("role") != "user":
+        final.pop(0)
+
+    # Merge consecutive same-role messages
+    merged = []
+    for msg in final:
+        if merged and merged[-1].get("role") == msg.get("role"):
+            prev_c = merged[-1].get("content", [])
+            curr_c = msg.get("content", [])
+            if isinstance(prev_c, list) and isinstance(curr_c, list):
+                merged[-1] = {**merged[-1], "content": prev_c + curr_c}
+            elif isinstance(prev_c, str) and isinstance(curr_c, str):
+                merged[-1] = {**merged[-1], "content": prev_c + "\n" + curr_c}
+        else:
+            merged.append(msg)
+
+    return merged
 
 
 # ── Tool Definitions ──────────────────────────────────────
@@ -2459,6 +2513,31 @@ async def _run_tool_use_loop(user_id: int, msg) -> None:
             except Exception as e:
                 logger.warning(f"Failed to send text response: {e}")
 
+    except anthropic.BadRequestError as e:
+        error_msg = str(e)
+        logger.error(f"Tool-use handler failed (400): {error_msg}")
+        if "tool_result" in error_msg or "tool_use" in error_msg:
+            # Corrupted chat history — nuke it so next message works
+            logger.warning(f"[recovery] Clearing corrupted chat history for user {user_id}")
+            _chat_history[user_id] = []
+            try:
+                brain.store(
+                    content="[]",
+                    topic="user_session_chat",
+                    source=str(user_id),
+                    summary="chat history (cleared after corruption)",
+                )
+            except Exception:
+                pass
+            try:
+                await msg.reply_text("🔄 I had a memory glitch — cleared my conversation history. Please try again!")
+            except Exception:
+                pass
+        else:
+            try:
+                await msg.reply_text("🎨 Hey! Something went wrong. Try again or say 'make a post for [client]'.")
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f"Tool-use handler failed: {e}", exc_info=True)
         try:
