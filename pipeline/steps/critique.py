@@ -245,6 +245,93 @@ def format_critique_for_fix(critique: dict) -> str:
 
 
 # ══════════════════════════════════════════════════════════════
+# EDIT VERIFICATION — did the user's feedback get applied?
+# ══════════════════════════════════════════════════════════════
+
+EDIT_CHECK_SYSTEM = """You are a visual QA checker for a social media post editor.
+
+The user asked for a specific change to be made to a design. Your ONLY job:
+did the change actually happen?
+
+You are NOT reviewing the design quality, aesthetics, or anything else.
+You are ONLY checking: was the user's specific request applied?
+
+Return ONLY valid JSON:
+{
+  "applied": true | false,
+  "confidence": 1-10 (10 = definitely applied, 1 = definitely not),
+  "what_i_see": "1 sentence describing what the render actually shows regarding the requested change",
+  "fix_instruction": "if not applied: specific CSS/HTML instruction to fix it. if applied: empty string"
+}"""
+
+
+async def check_edit_applied(
+    rendered_png_path: str,
+    user_feedback: str,
+) -> dict:
+    """
+    Check if a user's edit feedback was actually applied in the rendered output.
+
+    Only checks the specific thing the user asked for — no general design review.
+    Returns dict with applied (bool), confidence, what_i_see, fix_instruction.
+    """
+    import json
+
+    img_path = Path(rendered_png_path)
+    if not img_path.exists():
+        return {"applied": False, "confidence": 1, "what_i_see": "Could not load image", "fix_instruction": ""}
+
+    img_b64 = base64.b64encode(img_path.read_bytes()).decode("utf-8")
+
+    content = [
+        {
+            "type": "text",
+            "text": (
+                f"The user asked for this change:\n\n"
+                f"\"{user_feedback}\"\n\n"
+                f"Look at the rendered result below. Was this change applied?"
+            ),
+        },
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": img_b64,
+            },
+        },
+    ]
+
+    try:
+        response = _client.messages.create(
+            model=config.VISION_MODEL,
+            max_tokens=500,
+            system=EDIT_CHECK_SYSTEM,
+            messages=[{"role": "user", "content": content}],
+        )
+
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+
+        result = json.loads(raw)
+        applied = result.get("applied", False)
+        confidence = result.get("confidence", 5)
+        logger.info(
+            f"Edit check: applied={applied}, confidence={confidence}/10 — {result.get('what_i_see', '')}"
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"Edit check failed: {e}")
+        # If check fails, don't block — assume it's fine
+        return {"applied": True, "confidence": 5, "what_i_see": f"Check error: {e}", "fix_instruction": ""}
+
+
+# ══════════════════════════════════════════════════════════════
 # COPY-MODE COMPARISON — visual diff, not aesthetic judgment
 # ══════════════════════════════════════════════════════════════
 

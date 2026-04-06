@@ -1703,6 +1703,42 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
 
         render_result = await render_post(new_decisions, image, client_name, dynamic_html=template_html, logo_b64=logo_b64, original_decisions=decisions, extra_images=extra_images or None, canvas_format=canvas_format)
 
+        # ── Verify-fix loop: check if freeform feedback was actually applied ──
+        if user_feedback and template_html:
+            from pipeline.steps.critique import check_edit_applied
+            from pipeline.steps.dynamic_template import fix_template_from_critique
+
+            max_verify_rounds = 2
+            for verify_round in range(1, max_verify_rounds + 1):
+                check = await check_edit_applied(render_result.final_image_path, user_feedback)
+                if check.get("applied") or check.get("confidence", 0) >= 7:
+                    logger.info(f"[edit] Feedback verified as applied (round {verify_round})")
+                    break
+
+                fix_instruction = check.get("fix_instruction", "")
+                if not fix_instruction:
+                    logger.info(f"[edit] Not applied but no fix instruction — accepting")
+                    break
+
+                logger.info(f"[edit] Feedback NOT applied (round {verify_round}) — retrying: {fix_instruction[:100]}")
+                await status_msg.edit_text(f"🔄 Adjusting... (attempt {verify_round + 1})")
+
+                retry_critique = (
+                    f"The user asked: \"{user_feedback}\"\n"
+                    f"This was NOT applied. Vision says: {check.get('what_i_see', '')}\n\n"
+                    f"[CRITICAL] user_feedback: {fix_instruction}\n"
+                    f"  → Fix: {fix_instruction}\n"
+                )
+                template_html = await fix_template_from_critique(
+                    template_html, retry_critique, new_decisions,
+                    reference_image_b64=reference_image_b64,
+                )
+                render_result = await render_post(
+                    new_decisions, image, client_name, dynamic_html=template_html,
+                    logo_b64=logo_b64, original_decisions=decisions,
+                    extra_images=extra_images or None, canvas_format=canvas_format,
+                )
+
         # Build change summary
         change_descriptions = []
         if add_element:
