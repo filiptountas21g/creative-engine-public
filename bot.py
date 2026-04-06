@@ -315,53 +315,79 @@ def _restore_user_post(user_id: int):
 
 def _sanitize_chat_history(hist: list[dict]) -> list[dict]:
     """Clean up restored chat history to prevent API errors.
-    Ensures every tool_use has a matching tool_result, and strips orphaned ones."""
+    Uses ID-based matching: every tool_use must have a tool_result with the same ID
+    in the next user message, and every tool_result must reference a tool_use in the
+    previous assistant message. Orphans on either side are stripped."""
     if not hist:
         return hist
 
-    clean = []
-    for i, msg in enumerate(hist):
-        # Check if this message contains tool_use blocks
-        has_tool_use = False
-        if msg.get("role") == "assistant":
-            content = msg.get("content", [])
-            if isinstance(content, list):
-                has_tool_use = any(
-                    isinstance(block, dict) and block.get("type") == "tool_use"
-                    for block in content
-                )
-
-        if has_tool_use:
-            # Check if the NEXT message is a tool_result
-            next_msg = hist[i + 1] if i + 1 < len(hist) else None
-            has_matching_result = False
-            if next_msg and next_msg.get("role") == "user":
-                next_content = next_msg.get("content", [])
-                if isinstance(next_content, list):
-                    has_matching_result = any(
-                        isinstance(block, dict) and block.get("type") == "tool_result"
-                        for block in next_content
-                    )
-
-            if not has_matching_result:
-                # Strip: tool_use without tool_result — would crash the API
-                logger.warning(f"[sanitize] Dropping orphaned tool_use message at index {i}")
+    # Pass 1: collect all tool_use IDs and tool_result IDs
+    tool_use_ids = set()
+    tool_result_ids = set()
+    for msg in hist:
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
                 continue
+            if block.get("type") == "tool_use" and block.get("id"):
+                tool_use_ids.add(block["id"])
+            elif block.get("type") == "tool_result" and block.get("tool_use_id"):
+                tool_result_ids.add(block["tool_use_id"])
 
-        clean.append(msg)
+    # IDs that have both a tool_use and tool_result
+    paired_ids = tool_use_ids & tool_result_ids
+    orphan_use_ids = tool_use_ids - paired_ids
+    orphan_result_ids = tool_result_ids - paired_ids
 
-    # Also strip any trailing tool_result without a preceding tool_use
-    while clean and clean[-1].get("role") == "user":
-        content = clean[-1].get("content", [])
-        if isinstance(content, list) and all(
-            isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-        ):
-            logger.warning("[sanitize] Dropping trailing orphaned tool_result")
-            clean.pop()
+    for oid in orphan_use_ids:
+        logger.warning(f"[sanitize] Dropping orphaned tool_use {oid}")
+    for oid in orphan_result_ids:
+        logger.warning(f"[sanitize] Dropping orphaned tool_result for {oid}")
+
+    # Pass 2: rebuild history, stripping orphaned blocks
+    clean = []
+    for msg in hist:
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            clean.append(msg)
+            continue
+
+        filtered_blocks = []
+        for block in content:
+            if not isinstance(block, dict):
+                filtered_blocks.append(block)
+                continue
+            if block.get("type") == "tool_use" and block.get("id") in orphan_use_ids:
+                continue  # drop orphaned tool_use
+            if block.get("type") == "tool_result" and block.get("tool_use_id") in orphan_result_ids:
+                continue  # drop orphaned tool_result
+            filtered_blocks.append(block)
+
+        # If all blocks were stripped, drop the entire message
+        if not filtered_blocks:
+            continue
+        clean.append({**msg, "content": filtered_blocks})
+
+    # Pass 3: ensure alternating user/assistant roles (no two consecutive same-role)
+    final = []
+    for msg in clean:
+        if final and final[-1].get("role") == msg.get("role"):
+            # Merge into previous message if same role
+            prev_content = final[-1].get("content", [])
+            curr_content = msg.get("content", [])
+            if isinstance(prev_content, list) and isinstance(curr_content, list):
+                final[-1] = {**final[-1], "content": prev_content + curr_content}
+            # else just skip the duplicate
         else:
-            break
+            final.append(msg)
 
-    return clean
+    # Must start with user message
+    while final and final[0].get("role") != "user":
+        final.pop(0)
+
+    return final
 
 
 def _restore_user_session(user_id: int):
