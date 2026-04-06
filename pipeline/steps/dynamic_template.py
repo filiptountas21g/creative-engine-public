@@ -515,13 +515,36 @@ Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
                 logger.info(f"Fix: replacing hardcoded '{actual_text[:40]}...' with {placeholder}")
                 html = html.replace(actual_text, placeholder, 1)
 
-        # Validate placeholders still present — if Opus dropped them, REJECT the fix
+        # Validate placeholders still present — if Opus dropped them, PATCH them back in
         has_any_image = "{{IMAGE_PATH}}" in html or "{{IMAGE_1}}" in html
         required = ["{{HEADLINE}}", "{{SUBTEXT}}", "{{CLIENT_NAME}}"]
         missing = [p for p in required if p not in html]
         if missing:
-            logger.warning(f"Fixed template missing placeholders: {missing} — REJECTING fix, keeping original")
-            return current_html  # Return the original, not the broken fix
+            logger.warning(f"Fixed template missing placeholders: {missing} — patching them in")
+            # Build a small block for each missing placeholder and inject before </body>
+            patch_parts = []
+            for placeholder in missing:
+                if placeholder == "{{HEADLINE}}":
+                    patch_parts.append(
+                        '<h1 style="font-family:var(--font-headline);font-size:var(--font-headline-size);'
+                        'font-weight:var(--font-headline-weight);color:var(--color-text);'
+                        'margin:20px 40px 0;">{{HEADLINE}}</h1>'
+                    )
+                elif placeholder == "{{SUBTEXT}}":
+                    patch_parts.append(
+                        '<p style="font-size:14px;color:var(--color-subtext);'
+                        'margin:8px 40px;">{{SUBTEXT}}</p>'
+                    )
+                elif placeholder == "{{CLIENT_NAME}}":
+                    patch_parts.append(
+                        '<div style="position:absolute;bottom:20px;left:40px;'
+                        'font-size:11px;color:var(--color-subtext);letter-spacing:0.05em;'
+                        'text-transform:uppercase;">{{CLIENT_NAME}}</div>'
+                    )
+            if patch_parts and "</body>" in html:
+                patch_html = "\n".join(patch_parts)
+                html = html.replace("</body>", f"{patch_html}\n</body>")
+                logger.info(f"Patched {len(missing)} missing placeholders into template")
 
         # Post-process hardcoded colors
         import re
