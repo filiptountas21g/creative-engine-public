@@ -79,14 +79,15 @@ IMAGE DISPLAY — CRITICAL for multi-photo layouts:
   in the reference, they should take up ~40% in your reproduction.
 - Set overflow: visible on image containers unless you specifically need clipping.
 
-TEXT PROPORTIONALITY — CRITICAL:
-- Match the TEXT SIZES from the reference proportionally. If a label is small (12-16px) in the
-  reference, do NOT make it 60px+ in the reproduction.
-- Names, titles, and labels below photos should be small and clean (14-20px typically), not oversized.
-- Only the main HEADLINE should be large. Secondary text (names, roles, company names, descriptions)
-  should be proportionally smaller, matching the reference hierarchy.
-- All text must fit within its container without overflowing or getting cut off.
-  Use overflow: hidden; text-overflow: ellipsis; or reduce font-size if text is too long.
+TEXT PROPORTIONALITY — CRITICAL (this is the #1 most common mistake):
+- ONLY {{HEADLINE}} should use var(--font-headline-size). Everything else must be MUCH smaller.
+- Names under photos: 13-15px, font-weight 600, var(--color-text). Like a photo caption.
+- Roles/titles under photos: 10-12px, font-weight 400, uppercase, letter-spacing 0.05em, var(--color-subtext). Like a tiny label.
+- Company names under photos: 10-12px, same as roles.
+- These are CAPTIONS, not headlines. If the text under a photo is bigger than 16px, it is WRONG.
+- The visual hierarchy must be: HEADLINE (large) >> photo names (small) >> roles/titles (tiny).
+- All text must fit within its column without overflowing or getting cut off.
+  Set max-width on text containers and use overflow: hidden; text-overflow: ellipsis; white-space: nowrap; for long text.
 
 IMAGE RULES — read carefully:
 - GRADIENT or ABSTRACT BACKGROUND: Do NOT write CSS gradients. Use <img src="{{IMAGE_1}}"> as a full-bleed background (position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; z-index:0). The AI generates the visual. All text/elements go on top (z-index:1+).
@@ -187,10 +188,12 @@ IMAGE SIZING — CRITICAL:
   so faces show fully and are not cropped from the top.
 - NEVER let images get cut in half — the container must be tall enough to show the subject.
 
-TEXT SIZING — CRITICAL:
-- Secondary text (names, titles, roles, company names) must be proportionally small (14-20px).
-- Only {{{{HEADLINE}}}} should be large. Everything else should match the reference proportions.
-- All text must fit within its container. If it overflows, the font is TOO BIG.
+TEXT SIZING — CRITICAL (the #1 most common mistake):
+- Names under photos: 13-15px max, font-weight 600. NOT 24px, NOT 30px, NOT bold headings.
+- Roles/titles (e.g. "Founder - Company"): 10-12px max, uppercase, letter-spacing 0.05em.
+- These are tiny photo CAPTIONS, not section headings. Look at the reference — they are small.
+- Only {{{{HEADLINE}}}} should be large. Everything else must be proportionally tiny.
+- Set max-width and overflow: hidden; text-overflow: ellipsis; on each text column so text doesn't overflow.
 
 ADAPT ONLY:
 - Replace colors with CSS variables (var(--color-bg), var(--color-text), etc.)
