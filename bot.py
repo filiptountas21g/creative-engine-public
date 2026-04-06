@@ -1791,8 +1791,16 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             max_verify_rounds = 2
             for verify_round in range(1, max_verify_rounds + 1):
                 check = await check_edit_applied(render_result.final_image_path, user_feedback)
-                if check.get("applied") or check.get("confidence", 0) >= 7:
-                    logger.info(f"[edit] Feedback verified as applied (round {verify_round})")
+                applied = check.get("applied", False)
+                confidence = check.get("confidence", 5)
+
+                if applied:
+                    logger.info(f"[edit] Feedback verified as applied (round {verify_round}, confidence={confidence})")
+                    break
+
+                # Not applied but Vision isn't confident — accept rather than risk breaking it
+                if not applied and confidence < 5:
+                    logger.info(f"[edit] Uncertain (confidence={confidence}) — accepting as-is")
                     break
 
                 fix_instruction = check.get("fix_instruction", "")
@@ -1800,7 +1808,7 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
                     logger.info(f"[edit] Not applied but no fix instruction — accepting")
                     break
 
-                logger.info(f"[edit] Feedback NOT applied (round {verify_round}) — retrying: {fix_instruction[:100]}")
+                logger.info(f"[edit] Feedback NOT applied (confidence={confidence}, round {verify_round}) — retrying: {fix_instruction[:100]}")
                 await status_msg.edit_text(f"🔄 Adjusting... (attempt {verify_round + 1})")
 
                 retry_critique = (
