@@ -25,6 +25,7 @@ def _inject_into_template(
     logo_b64: str | None = None,
     original_decisions: CreativeDecisions | None = None,
     extra_images: list[ImageResult] | None = None,
+    canvas_format: str = "square",
 ) -> str:
     """Replace placeholders and CSS variables in the HTML template."""
     # Build Google Fonts URL (both headline and subtext)
@@ -109,6 +110,15 @@ def _inject_into_template(
         --image-padding: {decisions.image_padding}px;
         --image-object-fit: contain;
         --client-color: {decisions.color_accent};
+      }}
+
+      /* Hard canvas boundary — nothing overflows the viewport */
+      html, body {{
+        width: {'1920' if canvas_format == 'landscape' else '1080'}px;
+        height: 1080px;
+        max-width: {'1920' if canvas_format == 'landscape' else '1080'}px;
+        overflow: hidden !important;
+        box-sizing: border-box;
       }}
 
       /* Force overrides — ensures edits always take effect over hardcoded values */
@@ -248,7 +258,7 @@ async def render(
             template_html = template_path.read_text(encoding="utf-8")
 
     # Inject decisions
-    final_html = _inject_into_template(template_html, decisions, image, client_name, logo_b64, original_decisions, extra_images=extra_images)
+    final_html = _inject_into_template(template_html, decisions, image, client_name, logo_b64, original_decisions, extra_images=extra_images, canvas_format=canvas_format)
 
     # Generate output path
     output_dir = Path(config.OUTPUT_DIR)
