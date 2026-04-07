@@ -1274,7 +1274,7 @@ async def _classify_image(image_path: Path, caption: str, history: str) -> dict:
 
     try:
         response = _ai_client.messages.create(
-            model=config.OPUS_MODEL,
+            model="claude-sonnet-4-20250514",
             max_tokens=200,
             system=(
                 "You classify images sent to a design bot. Is this a LOGO/brand asset or INSPIRATION (design reference)?\n\n"
@@ -2460,7 +2460,7 @@ async def _run_tool_use_loop(user_id: int, msg) -> None:
     try:
         response = await asyncio.to_thread(
             _ai_client.messages.create,
-            model=config.OPUS_MODEL,
+            model="claude-sonnet-4-20250514",
             max_tokens=1024,
             system=system,
             tools=TOOLS,
@@ -2499,7 +2499,7 @@ async def _run_tool_use_loop(user_id: int, msg) -> None:
             messages = _get_history_for_api(user_id)
             response = await asyncio.to_thread(
                 _ai_client.messages.create,
-                model=config.OPUS_MODEL,
+                model="claude-sonnet-4-20250514",
                 max_tokens=1024,
                 system=system,
                 tools=TOOLS,
