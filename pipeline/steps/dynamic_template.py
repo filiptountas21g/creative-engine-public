@@ -413,19 +413,28 @@ Return the complete HTML file."""
 FIX_TEMPLATE_SYSTEM = """You are an expert HTML/CSS designer fixing a social media post template.
 
 You receive:
-1. The current HTML template
-2. A screenshot of how it renders (as a description of issues)
-3. Specific issues to fix
+1. The current HTML template code
+2. REFERENCE IMAGE — what the user wants it to look like (if available)
+3. CURRENT RENDER — what the HTML currently produces (if available). LOOK AT THIS CAREFULLY.
+4. A text description of issues to fix
+
+You can SEE both the target (reference) and the current output (render). Compare them visually
+and fix the HTML/CSS to make the render match the reference.
 
 Your job: return the FIXED HTML. Apply ALL the requested fixes.
 
 Rules:
 - Return ONLY the complete fixed HTML file. No explanation, no markdown fences.
-- Keep the same overall layout/structure — only fix the specific issues mentioned.
+- LOOK at the current render image. If you can see visual problems (text too large, images
+  clipped, wrong layout, overflow, wrong proportions), fix them in the CSS even if not
+  explicitly mentioned in the text feedback.
 - ALWAYS use CSS custom properties for colors: var(--color-bg), var(--color-text), var(--color-accent), var(--color-subtext), var(--client-color)
 - NEVER hardcode hex colors in the CSS
 - NEVER replace placeholders ({{HEADLINE}}, {{SUBTEXT}}, etc.) with actual text
 - Preserve all existing placeholders exactly as they are
+- NEVER invent new placeholders like {{SPEAKER_1_NAME}} — if you need speaker names/titles,
+  hardcode the actual text directly in the HTML.
+- Add overflow: hidden and text-overflow: ellipsis on text containers to prevent text overflow
 - Make the minimum changes needed to fix each issue
 - If the fix says "add more margin" → adjust the specific CSS property
 - If the fix says "improve contrast" → add a background overlay or adjust positioning
@@ -437,12 +446,14 @@ async def fix_template_from_critique(
     critique_text: str,
     decisions: CreativeDecisions,
     reference_image_b64: str | None = None,
+    rendered_image_path: str | None = None,
 ) -> str:
     """
     Fix an HTML template based on visual critique feedback.
 
     Takes the current HTML and critique instructions, returns fixed HTML.
-    Optionally receives the reference image so Opus can see what the user wants.
+    Optionally receives the reference image (what user wants) AND the rendered
+    image (what it currently looks like) so Opus can see both and make targeted fixes.
     """
     user_prompt = f"""Fix this HTML template based on the visual review.
 
@@ -463,11 +474,13 @@ DESIGN DECISIONS (for reference):
 Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
 
     try:
-        # Build message content — include reference image if available
+        import base64 as _b64
+        from pathlib import Path as _Path
+
+        # Build message content — include BOTH reference and rendered images
         message_content = []
 
         if reference_image_b64:
-            import base64 as _b64
             try:
                 raw = _b64.b64decode(reference_image_b64[:32])
                 if raw[:4] == b'RIFF' or b'WEBP' in raw[:12]:
@@ -485,6 +498,15 @@ Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
                 "source": {"type": "base64", "media_type": ref_media, "data": reference_image_b64}
             })
             logger.info("Sending reference image to Opus for template fix")
+
+        if rendered_image_path and _Path(rendered_image_path).exists():
+            render_b64 = _b64.b64encode(_Path(rendered_image_path).read_bytes()).decode("utf-8")
+            message_content.append({"type": "text", "text": "CURRENT RENDER (this is what your HTML currently produces — fix the issues you see):"})
+            message_content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": render_b64}
+            })
+            logger.info("Sending rendered image to Opus for visual comparison")
 
         message_content.append({"type": "text", "text": user_prompt})
 

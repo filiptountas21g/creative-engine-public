@@ -1820,6 +1820,7 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
                 template_html = await fix_template_from_critique(
                     template_html, retry_critique, new_decisions,
                     reference_image_b64=reference_image_b64,
+                    rendered_image_path=render_result.final_image_path,
                 )
                 render_result = await render_post(
                     new_decisions, image, client_name, dynamic_html=template_html,

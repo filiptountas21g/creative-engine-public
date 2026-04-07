@@ -409,6 +409,7 @@ async def run_pipeline(
                 fixed_html = await fix_template_from_critique(
                     current_html, fix_text, decisions,
                     reference_image_b64=reference_b64,
+                    rendered_image_path=render_result.final_image_path,
                 )
 
                 # Verify the fix didn't strip image placeholders
@@ -450,7 +451,11 @@ async def run_pipeline(
                 critique_text = format_critique_for_fix(critique)
                 await _notify("fix", f"Fixing {len(critique.get('issues', []))} issues...")
                 ref_b64 = forced_reference.get("_image_b64") if forced_reference and isinstance(forced_reference, dict) else None
-                current_html = await fix_template_from_critique(current_html, critique_text, decisions, reference_image_b64=ref_b64)
+                current_html = await fix_template_from_critique(
+                    current_html, critique_text, decisions,
+                    reference_image_b64=ref_b64,
+                    rendered_image_path=render_result.final_image_path,
+                )
                 logger.info(f"Template fixed (iteration {iteration}), re-rendering...")
 
         result.image_path = render_result.final_image_path
