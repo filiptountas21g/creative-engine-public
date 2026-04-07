@@ -121,43 +121,24 @@ def _inject_into_template(
         box-sizing: border-box;
       }}
 
-      /* Force overrides — ensures edits always take effect over hardcoded values */
-      body, body > div, body > section, body > main, body > article,
-      [class*="container" i], [class*="wrapper" i], [class*="card" i],
-      [class*="background" i], [class*="canvas" i], [class*="post" i],
-      [class*="slide" i], [class*="layout" i], [class*="main" i] {{
-        background-color: var(--color-bg) !important;
+      /* Targeted overrides — only apply to elements Opus marks with data attributes.
+         The old broad selectors ([class*="title"], h1, h2, etc.) with !important
+         were fighting Opus's CSS during edits, making all text headline-sized
+         and preventing positioning/sizing changes from taking effect. */
+      [data-role="headline"] {{
+        font-family: var(--font-headline), sans-serif;
+        font-weight: var(--font-headline-weight);
+        font-size: var(--font-headline-size);
+        letter-spacing: var(--font-headline-tracking);
+        line-height: var(--font-headline-line-height);
+        text-transform: var(--font-headline-case);
+        color: var(--color-text);
       }}
-      [class*="headline" i], [class*="title" i], [class*="heading" i], h1, h2 {{
-        font-family: var(--font-headline), sans-serif !important;
-        font-weight: var(--font-headline-weight) !important;
-        font-size: var(--font-headline-size) !important;
-        letter-spacing: var(--font-headline-tracking) !important;
-        line-height: var(--font-headline-line-height) !important;
-        text-transform: var(--font-headline-case) !important;
-        color: var(--color-text) !important;
-      }}
-      [class*="subtext" i], [class*="description" i], [class*="body-text" i], [class*="subtitle" i] {{
-        font-family: var(--font-subtext), sans-serif !important;
-        font-weight: var(--font-subtext-weight) !important;
-        font-size: var(--font-subtext-size) !important;
-        color: var(--color-subtext) !important;
-      }}
-      [class*="cta" i], [class*="button" i], [class*="action" i], [class*="btn" i] {{
-        background-color: var(--color-accent) !important;
-        border-color: var(--color-accent) !important;
-        color: var(--color-bg) !important;
-      }}
-      [class*="accent" i], [class*="label" i], [class*="tag" i], [class*="badge" i], [class*="pill" i] {{
-        color: var(--color-accent) !important;
-        border-color: var(--color-accent) !important;
-      }}
-      [class*="client" i], [class*="brand" i], [class*="logo-text" i] {{
-        color: var(--client-color) !important;
-      }}
-      [class*="hero" i] > img, [class*="image" i] > img, .hero-image {{
-        padding: var(--image-padding) !important;
-        object-fit: var(--image-object-fit) !important;
+      [data-role="subtext"] {{
+        font-family: var(--font-subtext), sans-serif;
+        font-weight: var(--font-subtext-weight);
+        font-size: var(--font-subtext-size);
+        color: var(--color-subtext);
       }}
     </style>
     """

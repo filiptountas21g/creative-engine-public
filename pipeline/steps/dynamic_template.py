@@ -548,13 +548,13 @@ Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
             for placeholder in missing:
                 if placeholder == "{{HEADLINE}}":
                     patch_parts.append(
-                        '<h1 style="font-family:var(--font-headline);font-size:var(--font-headline-size);'
+                        '<h1 data-role="headline" style="font-family:var(--font-headline);font-size:var(--font-headline-size);'
                         'font-weight:var(--font-headline-weight);color:var(--color-text);'
                         'margin:20px 40px 0;">{{HEADLINE}}</h1>'
                     )
                 elif placeholder == "{{SUBTEXT}}":
                     patch_parts.append(
-                        '<p style="font-size:14px;color:var(--color-subtext);'
+                        '<p data-role="subtext" style="font-size:14px;color:var(--color-subtext);'
                         'margin:8px 40px;">{{SUBTEXT}}</p>'
                     )
                 elif placeholder == "{{CLIENT_NAME}}":
