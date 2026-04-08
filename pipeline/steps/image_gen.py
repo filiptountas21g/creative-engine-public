@@ -348,6 +348,18 @@ async def _judge_stock_photos(
         "so we can generate with AI instead."
     )
 
+    # Build liked image context for Vision to understand user's taste
+    liked_styles = taste.get("liked_image_styles", [])
+    taste_hint = ""
+    if liked_styles:
+        # Show last 5 approved image descriptions
+        recent = liked_styles[-5:]
+        taste_hint = (
+            f"\nUSER'S APPROVED IMAGE STYLES (what they liked before):\n"
+            + "\n".join(f"  • {s[:100]}" for s in recent)
+            + "\nPrefer photos that feel similar in style/mood to these.\n"
+        )
+
     # Build vision message with all candidate images
     content = [
         {
@@ -359,7 +371,8 @@ async def _judge_stock_photos(
                 f"MUST HAVE: {must_have}\n"
                 f"BACKGROUND PREFERENCE: {concept.background}\n"
                 f"LIGHTING PREFERENCE: {concept.lighting}\n"
-                f"PREFERRED MOODS: {', '.join(taste.get('preferred_moods', []))}\n\n"
+                f"PREFERRED MOODS: {', '.join(taste.get('preferred_moods', []))}\n"
+                f"{taste_hint}\n"
                 f"Below are {len(candidates)} stock photo candidates. For each one, judge:\n"
                 f"1. Does it match the concept? (the main subject must be clearly present)\n"
                 f"2. Is the quality high enough? (sharp, well-lit, professional)\n"
@@ -463,6 +476,17 @@ Return ONLY valid JSON:
 async def _generate_ai_image(concept: CreativeConcept, taste: dict, slot_id: int | None = None) -> ImageResult:
     """Generate image with AI (Flux or Ideogram) — the original pipeline."""
 
+    # Build liked image context so Opus knows what imagery the user prefers
+    liked_styles = taste.get("liked_image_styles", [])
+    image_taste = ""
+    if liked_styles:
+        recent = liked_styles[-5:]
+        image_taste = (
+            "Previously approved image styles (user liked these):\n"
+            + "\n".join(f"  • {s[:120]}" for s in recent)
+            + "\nAim for a similar visual quality and feeling.\n"
+        )
+
     user_msg = f"""Write an image generation prompt for this concept.
 
 Object: {concept.object}
@@ -477,6 +501,8 @@ Taste preferences:
   Preferred compositions: {', '.join(taste.get('preferred_compositions', ['object-hero']))}
   Preferred moods: {', '.join(taste.get('preferred_moods', ['quiet confidence']))}
   Avoid: {', '.join(taste.get('avoid', []))}
+
+{image_taste}
 
 IMPORTANT: Do NOT include any text in the prompt. The template system handles all text."""
 
@@ -596,6 +622,66 @@ async def _poll_fal_result(client: httpx.AsyncClient, request_id: str, max_polls
         await asyncio.sleep(2)
 
     raise TimeoutError("Flux generation timed out")
+
+
+async def remove_background(image_path: str) -> str:
+    """Remove background from an image using fal.ai's birefnet model.
+
+    Takes a local image path, uploads to fal.ai, returns new path to
+    transparent PNG. Falls back to original if removal fails.
+    """
+    if not config.FAL_KEY:
+        logger.warning("FAL_KEY not set — cannot remove background")
+        return image_path
+
+    try:
+        import base64 as _b64
+        from pathlib import Path as _Path
+
+        img_bytes = _Path(image_path).read_bytes()
+        img_b64 = _b64.b64encode(img_bytes).decode("utf-8")
+
+        # Detect media type
+        if img_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            media = "image/png"
+        else:
+            media = "image/jpeg"
+
+        data_uri = f"data:{media};base64,{img_b64}"
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://fal.run/fal-ai/birefnet",
+                headers={"Authorization": f"Key {config.FAL_KEY}"},
+                json={
+                    "image_url": data_uri,
+                    "model": "General Use (Light)",
+                    "operating_resolution": "1024x1024",
+                    "output_format": "png",
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+
+        # Download the result image
+        image_url = result.get("image", {}).get("url")
+        if not image_url:
+            logger.warning("Background removal returned no image URL")
+            return image_path
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            img_resp = await client.get(image_url)
+            img_resp.raise_for_status()
+
+        # Save as transparent PNG
+        output_path = _Path(image_path).with_suffix(".nobg.png")
+        output_path.write_bytes(img_resp.content)
+        logger.info(f"Background removed: {image_path} → {output_path} ({len(img_resp.content) // 1024}KB)")
+        return str(output_path)
+
+    except Exception as e:
+        logger.error(f"Background removal failed: {e}")
+        return image_path
 
 
 async def generate_extra_images(

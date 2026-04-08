@@ -447,13 +447,15 @@ async def fix_template_from_critique(
     decisions: CreativeDecisions,
     reference_image_b64: str | None = None,
     rendered_image_path: str | None = None,
+    user_screenshot_b64: str | None = None,
 ) -> str:
     """
     Fix an HTML template based on visual critique feedback.
 
     Takes the current HTML and critique instructions, returns fixed HTML.
-    Optionally receives the reference image (what user wants) AND the rendered
-    image (what it currently looks like) so Opus can see both and make targeted fixes.
+    Optionally receives the reference image (what user wants), the rendered
+    image (what it currently looks like), and a user screenshot (cropped/annotated
+    part they want changed) so Opus can see all three and make targeted fixes.
     """
     user_prompt = f"""Fix this HTML template based on the visual review.
 
@@ -507,6 +509,30 @@ Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
                 "source": {"type": "base64", "media_type": "image/png", "data": render_b64}
             })
             logger.info("Sending rendered image to Opus for visual comparison")
+
+        if user_screenshot_b64:
+            try:
+                raw_ss = _b64.b64decode(user_screenshot_b64[:32])
+                if raw_ss[:4] == b'RIFF' or b'WEBP' in raw_ss[:12]:
+                    ss_media = "image/webp"
+                elif raw_ss[:8] == b'\x89PNG\r\n\x1a\n':
+                    ss_media = "image/png"
+                else:
+                    ss_media = "image/jpeg"
+            except Exception:
+                ss_media = "image/jpeg"
+            message_content.append({
+                "type": "text",
+                "text": (
+                    "USER SCREENSHOT (the user sent this screenshot/crop to show exactly what they want changed — "
+                    "look carefully at what area or element this shows):"
+                ),
+            })
+            message_content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": ss_media, "data": user_screenshot_b64}
+            })
+            logger.info("Sending user screenshot to Opus for targeted edit")
 
         message_content.append({"type": "text", "text": user_prompt})
 
@@ -780,12 +806,15 @@ async def save_liked_template(
     concept_summary: str,
     client: str = "ALL",
     modifications: dict | None = None,
+    image_description: str = "",
 ) -> None:
     """Save a liked template combo to the Brain for future reference.
 
     Args:
         modifications: Optional dict of changes to apply before saving,
             e.g. {"color_accent": "#FF6B00", "font_headline": "Syne"}
+        image_description: What the hero image showed (e.g. "glass prism refracting light",
+            "corporate woman silhouette") — used to learn image preferences.
     """
     liked_data = {
         "template_style": decisions.template,
@@ -796,6 +825,7 @@ async def save_liked_template(
         "color_accent": decisions.color_accent,
         "concept": concept_summary,
         "headline": decisions.headline,
+        "image_description": image_description,
     }
 
     # Apply modifications before saving

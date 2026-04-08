@@ -2282,6 +2282,15 @@ async def _exec_save_favorite(params: dict, user_id: int, msg) -> str:
     concept_summary = decisions.headline if hasattr(decisions, "headline") else ""
     template_html = last.get("template_html", "")
 
+    # Collect image description from concept + image result
+    image_description = ""
+    concept_obj = last.get("concept")
+    image_obj = last.get("image")
+    if concept_obj and hasattr(concept_obj, "object"):
+        image_description = concept_obj.object
+    if image_obj and hasattr(image_obj, "prompt_used") and image_obj.prompt_used:
+        image_description = image_obj.prompt_used  # more specific than concept
+
     try:
         await save_liked_template(
             brain=brain,
@@ -2290,6 +2299,7 @@ async def _exec_save_favorite(params: dict, user_id: int, msg) -> str:
             concept_summary=concept_summary,
             client=client_name,
             modifications=modifications,
+            image_description=image_description,
         )
 
         # Also save the actual HTML to Google Drive for reuse
