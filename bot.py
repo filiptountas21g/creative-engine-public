@@ -60,11 +60,22 @@ _last_analysis_by_user: dict[int, dict] = {}
 _analysis_by_msg: dict[int, dict] = {}
 
 # Conversation history per user — stores full API message objects for tool-use
-MAX_HISTORY = 20
+MAX_HISTORY = 10  # tight window — prevents corruption from complex tool_use/tool_result pairs
 _chat_history: dict[int, list[dict]] = {}
 
 # Track last pipeline result per user for edits (in-memory only, resets on restart)
 _last_post_by_user: dict[int, dict] = {}
+
+# Track posts by Telegram message ID — so user can reply to any old post to save/edit it
+# Key: message_id → post_data dict (same format as _last_post_by_user values)
+MAX_TRACKED_POSTS = 20  # keep last 20 posts per user in memory
+_posts_by_msg_id: dict[int, dict] = {}
+
+# Image vault — stores all images ever used in posts so they can be restored
+# Key: user_id → {"hero": ImageResult, "extra_1": ImageResult, ...}
+# Images accumulate across edits — never lost until explicit clear
+MAX_VAULT_IMAGES = 10
+_image_vault: dict[int, dict[str, object]] = {}
 
 # Track previous decisions per user for variety
 _previous_decisions: dict[int, list[dict]] = {}
@@ -77,6 +88,77 @@ _restored_users: set[int] = set()
 
 
 MAX_SAVED_REFERENCES = 5  # keep last 5 references per user (~1MB total)
+
+
+def _vault_save_images(user_id: int, hero_image=None, extra_images=None):
+    """Save all images from a post to the vault. Accumulates — never overwrites."""
+    if user_id not in _image_vault:
+        _image_vault[user_id] = {}
+
+    vault = _image_vault[user_id]
+
+    if hero_image and hasattr(hero_image, 'image_path') and hero_image.image_path:
+        # Save with a descriptive key based on the prompt
+        label = (hero_image.prompt_used or "hero")[:60].strip()
+        vault[f"hero_{label}"] = hero_image
+        # Always keep a "latest_hero" reference
+        vault["latest_hero"] = hero_image
+        logger.debug(f"[vault] Saved hero: {label[:30]}")
+
+    if extra_images:
+        for i, img in enumerate(extra_images):
+            if img and hasattr(img, 'image_path') and img.image_path:
+                label = (img.prompt_used or f"extra_{i+1}")[:60].strip()
+                vault[f"extra_{i+1}_{label}"] = img
+                vault[f"latest_extra_{i+1}"] = img
+                logger.debug(f"[vault] Saved extra_{i+1}: {label[:30]}")
+
+    # Prune if too many
+    if len(vault) > MAX_VAULT_IMAGES * 2:
+        # Keep only "latest_" keys and the most recent others
+        latest = {k: v for k, v in vault.items() if k.startswith("latest_")}
+        others = [(k, v) for k, v in vault.items() if not k.startswith("latest_")]
+        others = others[-(MAX_VAULT_IMAGES):]
+        _image_vault[user_id] = {**dict(others), **latest}
+
+    logger.info(f"[vault] User {user_id}: {len(_image_vault[user_id])} images stored")
+
+
+def _vault_get(user_id: int, search: str = None):
+    """Get an image from the vault. If search is given, fuzzy match against labels."""
+    vault = _image_vault.get(user_id, {})
+    if not vault:
+        return None
+
+    if not search:
+        return vault.get("latest_hero")
+
+    search_lower = search.lower()
+    # Try exact key match first
+    for key, img in vault.items():
+        if search_lower in key.lower():
+            return img
+
+    # Try matching against prompt_used
+    for key, img in vault.items():
+        if hasattr(img, 'prompt_used') and img.prompt_used and search_lower in img.prompt_used.lower():
+            return img
+
+    # Fall back to latest hero
+    return vault.get("latest_hero")
+
+
+def _track_post_by_msg_id(msg_id: int, user_id: int, post_data: dict):
+    """Track a sent post by its Telegram message ID so user can reply to it later."""
+    _posts_by_msg_id[msg_id] = {**post_data, "_user_id": user_id}
+    # Prune old entries — keep only last MAX_TRACKED_POSTS per user
+    user_posts = [(mid, d) for mid, d in _posts_by_msg_id.items() if d.get("_user_id") == user_id]
+    if len(user_posts) > MAX_TRACKED_POSTS:
+        # Sort by message ID (older = lower) and remove excess
+        user_posts.sort(key=lambda x: x[0])
+        for mid, _ in user_posts[:-MAX_TRACKED_POSTS]:
+            _posts_by_msg_id.pop(mid, None)
+    logger.debug(f"[track] Post tracked: msg_id={msg_id}, total tracked={len(_posts_by_msg_id)}")
 
 
 def _persist_user_reference(user_id: int):
@@ -503,22 +585,36 @@ def _add_to_history(user_id: int, role: str, content):
 
 
 def _trim_history(user_id: int):
-    """Trim history to MAX_HISTORY, never splitting tool_use from tool_result."""
+    """Strict rolling window: always keep exactly MAX_HISTORY messages.
+    Old messages are simply dropped — no tool_use IDs survive = no corruption."""
     hist = _chat_history.get(user_id, [])
     if len(hist) <= MAX_HISTORY:
         return
-    # Find the safest trim point: skip forward until we're not in a tool_result
-    trim_to = len(hist) - MAX_HISTORY
-    while trim_to < len(hist):
-        msg = hist[trim_to]
-        # Don't start on a tool_result (it needs the preceding assistant tool_use)
-        if msg["role"] == "user" and isinstance(msg.get("content"), list):
-            # Check if it's a tool_result block
-            if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in msg["content"]):
-                trim_to += 1
+
+    # Drop from the front until we're at MAX_HISTORY
+    # But never start on a tool_result (it needs the preceding tool_use)
+    while len(hist) > MAX_HISTORY:
+        first = hist[0]
+        # If the first message is a user tool_result, drop it (orphaned anyway)
+        # If the first message is an assistant with tool_use, drop it AND the next tool_result
+        if first.get("role") == "user" and isinstance(first.get("content"), list):
+            has_tool_result = any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in first["content"]
+            )
+            if has_tool_result:
+                # This is an orphaned tool_result — drop it
+                hist.pop(0)
                 continue
-        break
-    _chat_history[user_id] = hist[trim_to:]
+
+        hist.pop(0)
+
+    # Safety: must start with user message
+    while hist and hist[0].get("role") != "user":
+        hist.pop(0)
+
+    _chat_history[user_id] = hist
+    logger.debug(f"[trim] user {user_id}: trimmed to {len(hist)} messages")
 
 
 def _get_history_for_api(user_id: int) -> list[dict]:
@@ -716,12 +812,12 @@ TOOLS = [
         "name": "edit_post",
         "description": (
             "Modify the last generated post — change text, colors, fonts, sizes, layout, translate text, "
-            "add/remove logo. The hero image stays the same. Use for ANY tweak to the existing post: "
-            "translating, restyling, changing text, adjusting layout. "
+            "add/remove logo, adjust background color. The hero image stays the same. "
+            "Use for ANY tweak to the existing post: translating, restyling, changing text, adjusting layout, "
+            "changing colors (including background color). "
             "For visual/layout feedback like 'make pictures bigger', 'move text to the right', 'more spacing', "
-            "use the 'feedback' field — Opus will directly edit the HTML/CSS to fix it. "
-            "IMPORTANT: Only include fields that need to change. "
-            "DO NOT use this for background gradients, textures, or atmospheric backgrounds — use replace_image with background_style instead."
+            "'make the image cover the background', 'darker color' — use the 'feedback' field. "
+            "IMPORTANT: Only include fields that need to change. Combine ALL user requests into ONE call."
         ),
         "input_schema": {
             "type": "object",
@@ -751,7 +847,7 @@ TOOLS = [
                     "type": "string",
                     "enum": ["uppercase", "lowercase", "none"],
                 },
-                "color_bg": {"type": "string", "description": "Solid background color (hex). Only use for SOLID flat colors (e.g. pure black, white, navy). For gradients, textures, or any visual background — use replace_image with background_style instead."},
+                "color_bg": {"type": "string", "description": "Background color (hex). Use for any color change — 'darker orange', 'change to blue', 'lighter', etc."},
                 "color_text": {"type": "string", "description": "Text color (hex)"},
                 "color_accent": {"type": "string", "description": "Accent color (hex)"},
                 "color_subtext": {"type": "string", "description": "Subtext color (hex)"},
@@ -761,6 +857,7 @@ TOOLS = [
                 "image_padding": {"type": "integer", "description": "Image padding (0-200px)"},
                 "add_logo": {"type": "boolean", "description": "Set true to add the client's logo"},
                 "remove_logo": {"type": "boolean", "description": "Set true to remove the logo"},
+                "remove_background": {"type": "boolean", "description": "Set true to remove the background from the hero image (make it transparent). Use when user says 'remove the background', 'cut out the person', 'transparent background', etc."},
                 "add_element": {
                     "type": "string",
                     "description": (
@@ -778,11 +875,11 @@ TOOLS = [
     {
         "name": "replace_image",
         "description": (
-            "Replace the hero image in the last post while keeping all design decisions (font, colors, layout, text). "
-            "Searches for a new stock photo or generates a new AI image using the same concept. "
-            "Use when user says 'replace the photo', 'use a stock image', 'change the picture', etc.\n"
-            "Use background_style when user wants an AI-generated background (gradient, abstract, texture) — "
-            "e.g. 'orange gradient background', 'dark abstract background', 'warm amber texture'."
+            "Generate a completely NEW hero image for the last post. Keeps all design decisions (font, colors, layout, text). "
+            "ONLY use when the user explicitly wants a different photo/image — 'replace the photo', 'use a stock image', 'change the picture'. "
+            "Do NOT use for color changes, layout tweaks, or resizing — those go to edit_post. "
+            "Use background_style ONLY when user explicitly asks for AI gradient/texture/abstract background — "
+            "e.g. 'make an abstract gradient background', 'smoky texture background'."
         ),
         "input_schema": {
             "type": "object",
@@ -806,6 +903,24 @@ TOOLS = [
         },
     },
     {
+        "name": "restore_image",
+        "description": (
+            "Restore a previously used image from the vault. Use when the user says "
+            "'put back the woman', 'restore the old picture', 'use the previous image', "
+            "'bring back the photo you removed'. The vault keeps all images from this session."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "search": {
+                    "type": "string",
+                    "description": "Description of which image to restore — e.g. 'woman with bob cut', 'the first hero image', 'the portrait'. Fuzzy matched against stored image prompts.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "save_favorite",
         "description": (
             "Save the current post design as a favorite/liked template. Use when the user approves, "
@@ -819,6 +934,22 @@ TOOLS = [
                     "type": "object",
                     "description": "Design tweaks to save (e.g. {'color_accent': '#FF6B00'})",
                 },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "delete_template",
+        "description": (
+            "Delete a saved/liked template from memory. Use when the user doesn't like the current style, "
+            "says 'delete this template', 'remove this style', 'I don't like this', 'forget this design'. "
+            "Deletes the liked template that matches the current post's style."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "client": {"type": "string", "description": "Only delete templates for this client. Optional."},
+                "delete_all": {"type": "boolean", "description": "Delete ALL liked templates. Only if user explicitly asks."},
             },
             "required": [],
         },
@@ -1093,7 +1224,8 @@ Rules:
   Reference: Red=#DC2626, Orange=#EA580C, Amber=#D97706, Yellow=#EAB308, Lime=#65A30D, Green=#16A34A, Emerald=#059669, Teal=#0D9488, Cyan=#0891B2, Sky=#0284C7, Blue=#2563EB, Indigo=#4F46E5, Violet=#7C3AED, Purple=#9333EA, Fuchsia=#C026D3, Pink=#DB2777, Rose=#E11D48, White=#FFFFFF, Black=#000000, Gray=#6B7280, Beige=#F5F0E8, Navy=#1E3A5F, Burgundy=#800020, Gold=#FFD700, Coral=#FF6B6B, Turquoise=#40E0D0, Peach=#FFCBA4, Lavender=#E6E6FA, Mint=#98FB98, Cream=#FFFDD0, Charcoal=#36454F
 - STOCK PHOTOS: When user asks to "use stock photos", "use real photos", "no AI images", "use actual photos", or anything similar → set image_source="stock" on generate_post. This is CRITICAL. Default is "auto".
 - LANDSCAPE FORMAT: When user asks for "landscape", "16:9", "widescreen", "horizontal" or "can you make it landscape" → set format="landscape" on generate_post. Default is "square".
-- BACKGROUND CHANGES: Whenever the user asks to change the background to ANYTHING visual — gradient, warm tone, orange, dark, abstract, texture, glow, moody, cinematic, etc. — call replace_image with background_style describing the visual in detail (e.g. "rich warm orange gradient, smooth, no text, abstract glow"). NEVER use edit_post color_bg for gradients or atmospheric backgrounds. color_bg is ONLY for flat solid colors (pure black, white, navy). This applies even if the user does NOT say "AI" — the default is ALWAYS AI-generated backgrounds for any non-solid request.
+- ONE TOOL PER EDIT: When the user gives feedback on the current post, use ONLY ONE tool call. Combine everything into a single edit_post. Do NOT split a single request into edit_post + replace_image. Example: "make the woman bigger and darker orange" = ONE edit_post call with feedback + color_bg. Only use replace_image ALONE when the user SPECIFICALLY wants a brand new image or photo.
+- BACKGROUND CHANGES: Use replace_image with background_style ONLY when the user explicitly asks for a gradient, texture, pattern, or abstract AI-generated background (e.g. "make a gradient background", "abstract dark texture", "smoky background effect"). For simple color changes like "darker orange", "lighter", "change to blue", "warmer color" → use edit_post with color_bg. color_bg works for ANY solid/flat color.
 - INSPIRATION / COPY: When user sends an image and says "make a post like this", "similar to this one", "based on this", "copy this", "recreate this", "clone this design" → set use_last_inspiration=true on generate_post. The system will decompose the image element-by-element (icons, UI widgets, photos, shapes) and replicate it precisely. Do NOT set this for normal posts.
 - CLIENT RULES: When user says "never use X for client", "always use Y for client", "client should not have Z" → call save_client_rule to permanently store this. Do this IN ADDITION to any other action (like generating a new post). Example: "never use orange for Georgoulis" → save_client_rule + generate_post.
 - DESIGN SCOUT: When user asks to find fresh designs, inspiration, or specific styles, call scout_designs. Always set the focus field from what they say — e.g. "find me dark luxury posts" → focus="dark luxury editorial", "look for minimal health brand posts" → focus="minimal health brand", "something with bold typography" → focus="bold typography". If there are pending scout results, watch for the user's approval reply.
@@ -1125,12 +1257,18 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await file.download_to_drive(str(tmp_path))
 
         # Step 1: Claude classifies what this image is
-        image_intent = await _classify_image(tmp_path, caption, history_text)
+        has_recent_post = user_id in _last_post_by_user
+        image_intent = await _classify_image(tmp_path, caption, history_text, has_recent_post=has_recent_post)
         logger.info(f"[photo] classified as: {image_intent}")
 
         if image_intent.get("type") == "logo":
             # ── LOGO / BRAND ASSET ──
             await _handle_logo_upload(msg, status_msg, tmp_path, caption, image_intent, user_id)
+            return
+
+        if image_intent.get("type") == "edit_feedback" and has_recent_post:
+            # ── EDIT FEEDBACK WITH SCREENSHOT ──
+            await _handle_edit_feedback_with_screenshot(msg, status_msg, tmp_path, caption, image_intent, user_id)
             return
 
         # ── INSPIRATION (default) ──
@@ -1153,89 +1291,35 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception:
             pass
 
-        if wants_generation:
-            # FAST PATH: Skip analysis, go straight to generation
-            # The pipeline will decompose the image itself — no need for taste analysis
-            logger.info(f"[photo] Caption wants generation — skipping analysis, going straight to pipeline")
-            await status_msg.delete()
-
-            _persist_user_reference(user_id)
-            _add_to_history(user_id, "user", f"[sent reference image] {caption}")
-
-            request_text = (
-                f"[User sent a reference image and wants to generate a post based on it. "
-                f"The image is stored as the latest inspiration. "
-                f"The user's message: \"{caption}\"]\n\n"
-                f"Call generate_post with use_last_inspiration=true. "
-                f"Extract the client name and brief from the caption."
-            )
-            _add_to_history(user_id, "user", request_text)
-            await _run_tool_use_loop(user_id, msg)
-            return
-
-        # STANDARD PATH: Analyze and show breakdown (user is just sharing inspiration)
-        analysis = await analyze_inspiration(tmp_path, context=caption)
-
-        brain.store(
-            topic="taste_reference",
-            source="telegram",
-            content=json.dumps(analysis, ensure_ascii=False),
-            client=client or "ALL",
-            summary=(
-                f"{analysis.get('composition', {}).get('template_match', '?')} layout, "
-                f"{analysis.get('feeling', {}).get('mood', '?')} mood"
-            ),
-            tags=["telegram", analysis.get("composition", {}).get("template_match", "unknown")],
-        )
-
+        # Save image and let Claude decide what to do — no analysis, no breakdown
+        _persist_user_reference(user_id)
         await status_msg.delete()
 
-        analysis_text = format_analysis_for_telegram(analysis)
-        if client:
-            analysis_text = f"🏷️ Tagged for: <b>{client}</b>\n\n" + analysis_text
+        _add_to_history(user_id, "user", f"[sent a reference image] {caption}")
 
-        _last_analysis_by_user[user_id].update(analysis)
-        _persist_user_reference(user_id)
-        _remember(user_id, "analysis", analysis, label=analysis.get("summary", caption or "inspiration image")[:60])
-        _add_to_history(user_id, "user", f"[sent inspiration photo] {caption}")
-        _add_to_history(user_id, "assistant", analysis_text[:300])
-
-        # Try HTML first, fall back to plain text if Telegram rejects the formatting
-        reply = None
-        try:
-            if len(analysis_text) <= 4000:
-                reply = await msg.reply_text(analysis_text, parse_mode="HTML")
-            else:
-                chunks = [analysis_text[i:i + 4000] for i in range(0, len(analysis_text), 4000)]
-                for chunk in chunks:
-                    reply = await msg.reply_text(chunk, parse_mode="HTML")
-        except Exception as html_err:
-            logger.warning(f"HTML parse failed, sending as plain text: {html_err}")
-            plain = _re.sub(r'<[^>]+>', '', analysis_text)
-            if len(plain) <= 4000:
-                reply = await msg.reply_text(plain)
-            else:
-                chunks = [plain[i:i + 4000] for i in range(0, len(plain), 4000)]
-                for chunk in chunks:
-                    reply = await msg.reply_text(chunk)
-
-        if reply:
-            _analysis_by_msg[reply.message_id] = analysis
-
-        # If there's a caption that isn't a generation command, let Claude decide
         if caption:
-            logger.info(f"Photo has caption — letting Claude decide: '{caption[:60]}'")
+            # User sent a photo with a caption — let Claude decide (generate, edit, etc)
+            logger.info(f"[photo] Image with caption — letting Claude decide: '{caption[:60]}'")
             request_text = (
-                f"[User sent an inspiration image which I just analyzed. "
-                f"The analysis is now stored as the latest inspiration. "
-                f"The user's message with the image was: \"{caption}\"]\n\n"
-                f"Decide what to do: if the user is asking you to create/generate/make a post based on this image, "
+                f"[User sent a reference image. The image is saved as the latest inspiration. "
+                f"The user's message: \"{caption}\"]\n\n"
+                f"If the user wants to generate/create/make/remake/copy a post based on this image, "
                 f"call generate_post with use_last_inspiration=true. "
-                f"If they're just sharing inspiration or adding context, respond naturally."
+                f"Extract the client name and brief from the caption. "
+                f"If they're just sharing or adding context, respond naturally and briefly."
             )
-            _add_to_history(user_id, "user", request_text)
-            await _run_tool_use_loop(user_id, msg)
-            return
+        else:
+            # No caption — just acknowledge the image
+            logger.info(f"[photo] Image saved, no caption")
+            request_text = (
+                f"[User sent a reference image with no caption. The image is saved. "
+                f"Acknowledge briefly — say something like 'Got it, saved as reference. "
+                f"Want me to make a post based on this?']"
+            )
+
+        _add_to_history(user_id, "user", request_text)
+        await _run_tool_use_loop(user_id, msg)
+        return
 
     except Exception as e:
         logger.error(f"Photo analysis failed: {e}")
@@ -1264,23 +1348,39 @@ def _get_history_text_simple(user_id: int) -> str:
     return "\n".join(lines)
 
 
-async def _classify_image(image_path: Path, caption: str, history: str) -> dict:
-    """Use Claude Vision to classify if an image is a logo or inspiration."""
+async def _classify_image(image_path: Path, caption: str, history: str, has_recent_post: bool = False) -> dict:
+    """Use Claude Vision to classify if an image is a logo, inspiration, or edit feedback."""
     img_bytes = image_path.read_bytes()
     import base64
     img_b64 = base64.b64encode(img_bytes).decode("utf-8")
     suffix = image_path.suffix.lower()
     media = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
 
+    recent_post_hint = ""
+    if has_recent_post:
+        recent_post_hint = (
+            "\nIMPORTANT: The user has a recently generated post. If this image looks like a screenshot "
+            "of a design/post (possibly cropped or annotated) and the caption sounds like feedback "
+            "(e.g. 'remove this', 'change this part', 'make this bigger', 'delete the text here', "
+            "'this element is wrong'), classify it as \"edit_feedback\".\n"
+        )
+
     try:
         response = _ai_client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=200,
             system=(
-                "You classify images sent to a design bot. Is this a LOGO/brand asset or INSPIRATION (design reference)?\n\n"
+                "You classify images sent to a design bot. What is this image?\n\n"
+                "Three types:\n"
+                "1. \"logo\" — a logo, icon, or brand mark\n"
+                "2. \"inspiration\" — a design reference the user likes (for learning taste)\n"
+                "3. \"edit_feedback\" — a screenshot of the bot's own output (or a cropped part of it) "
+                "where the user is pointing out something to change, remove, or fix\n\n"
                 "Consider the caption and conversation history for context.\n"
-                "Return JSON: {\"type\": \"logo\" or \"inspiration\", \"client\": \"ClientName\" or null, \"reason\": \"brief reason\"}\n"
-                "Only return \"logo\" if the image is clearly a logo, icon, or brand mark.\n"
+                f"{recent_post_hint}"
+                "Return JSON: {\"type\": \"logo\" or \"inspiration\" or \"edit_feedback\", "
+                "\"client\": \"ClientName\" or null, \"reason\": \"brief reason\", "
+                "\"edit_instruction\": \"what the user wants changed\" or null}\n"
                 f"Caption: {caption}\nRecent conversation:\n{history}\n\n"
                 "Return ONLY JSON."
             ),
@@ -1337,6 +1437,52 @@ async def _handle_logo_upload(msg, status_msg, image_path: Path, caption: str, i
         pass
 
 
+async def _handle_edit_feedback_with_screenshot(
+    msg, status_msg, image_path: Path, caption: str, intent: dict, user_id: int,
+):
+    """User sent a screenshot of the bot's output with edit instructions.
+
+    The screenshot is passed to the edit flow so Opus can see exactly
+    what the user is pointing at.
+    """
+    import base64
+
+    img_b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+
+    # Store the screenshot so the edit flow can use it
+    if user_id not in _last_post_by_user:
+        await status_msg.delete()
+        await msg.reply_text("I don't have a recent post to edit. Generate one first!")
+        return
+
+    # Attach the user's screenshot to the post data so _exec_edit_post can use it
+    _last_post_by_user[user_id]["user_screenshot_b64"] = img_b64
+
+    feedback = caption or intent.get("edit_instruction") or "Fix what I'm pointing at in this screenshot"
+    logger.info(f"[photo] Edit feedback with screenshot: {feedback[:80]}")
+
+    await status_msg.delete()
+
+    # Route through the tool-use loop as an edit request
+    _add_to_history(user_id, "user", f"[sent screenshot of my design with edit instructions] {feedback}")
+
+    request_text = (
+        f"[The user sent a SCREENSHOT of the current post and wants changes. "
+        f"The screenshot has been saved — the edit tool will pass it to Opus. "
+        f"The user's instruction: \"{feedback}\"]\n\n"
+        f"Call edit_post with feedback set to the user's instruction. "
+        f"Do NOT treat this as inspiration or a new generation request."
+    )
+    _add_to_history(user_id, "user", request_text)
+    await _run_tool_use_loop(user_id, msg)
+
+    # Clean up temp file
+    try:
+        image_path.unlink()
+    except Exception:
+        pass
+
+
 def _extract_client_from_caption(caption: str) -> str | None:
     if not caption:
         return None
@@ -1370,8 +1516,12 @@ async def _execute_tool(tool_name: str, tool_input: dict, user_id: int, msg) -> 
         return await _exec_edit_post(tool_input, user_id, msg)
     elif tool_name == "replace_image":
         return await _exec_replace_image(tool_input, user_id, msg)
+    elif tool_name == "restore_image":
+        return await _exec_restore_image(tool_input, user_id, msg)
     elif tool_name == "save_favorite":
         return await _exec_save_favorite(tool_input, user_id, msg)
+    elif tool_name == "delete_template":
+        return await _exec_delete_template(tool_input, user_id, msg)
     elif tool_name == "process_feedback":
         return await _exec_process_feedback(tool_input, user_id)
     elif tool_name == "get_taste_profile":
@@ -1470,7 +1620,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
                     pil_img.convert("RGB").save(compressed, "JPEG", quality=85)
                     send_path = compressed
                     logger.info(f"Compressed image: {img_path.stat().st_size // 1024}KB → {compressed.stat().st_size // 1024}KB")
-            await msg.reply_photo(
+            sent_msg = await msg.reply_photo(
                 photo=open(send_path, "rb"),
                 caption=result_text[:1024],
                 parse_mode="HTML",
@@ -1481,6 +1631,7 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
             if len(result_text) > 1024:
                 await msg.reply_text(result_text[1024:], parse_mode="HTML")
         except Exception as e:
+            sent_msg = None
             logger.error(f"Failed to send image: {e}")
             await msg.reply_text(result_text, parse_mode="HTML")
 
@@ -1506,6 +1657,13 @@ async def _exec_generate_post(params: dict, user_id: int, msg) -> str:
             _last_post_by_user[user_id] = post_data
             _remember(user_id, "post", post_data, label=f"{client_name}: {result.decisions.headline[:40]}")
             _persist_user_post(user_id)
+
+            # Save all images to vault (never lost across edits)
+            _vault_save_images(user_id, hero_image=result.hero_image, extra_images=result.extra_images)
+
+            # Track by message ID so user can reply to this post later
+            if sent_msg:
+                _track_post_by_msg_id(sent_msg.message_id, user_id, post_data)
 
             if user_id not in _previous_decisions:
                 _previous_decisions[user_id] = []
@@ -1647,6 +1805,25 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             needs_template_regen = True
             logger.info(f"[edit] Removing logo")
 
+        # Remove background from hero image
+        if changes.pop("remove_background", None):
+            if image and image.image_path:
+                from pipeline.steps.image_gen import remove_background
+                await status_msg.edit_text("✂️ Removing background...")
+                new_path = await remove_background(image.image_path)
+                if new_path != image.image_path:
+                    image = ImageResult(
+                        image_path=new_path,
+                        image_url=image.image_url,
+                        model_used=image.model_used,
+                        prompt_used=image.prompt_used,
+                    )
+                    logger.info(f"[edit] Background removed: {new_path}")
+                else:
+                    logger.warning(f"[edit] Background removal returned same path — may have failed")
+            else:
+                logger.warning(f"[edit] No hero image to remove background from")
+
         # Extract freeform feedback (handled separately via Opus HTML fix)
         user_feedback = changes.pop("feedback", None)
         add_element = changes.pop("add_element", None)
@@ -1729,6 +1906,9 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             logger.info(f"[edit] Regenerating HTML: {reason}")
             template_html = await generate_dynamic_template(new_decisions, brain, has_logo=logo_b64 is not None)
 
+        # Pick up user screenshot if they sent one (visual edit feedback)
+        user_screenshot_b64 = post_data.pop("user_screenshot_b64", None)
+
         # Apply freeform feedback — Opus directly edits the HTML/CSS (now with reference image)
         if (user_feedback or new_image_slot) and template_html:
             from pipeline.steps.dynamic_template import fix_template_from_critique
@@ -1747,16 +1927,28 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
                 )
 
             feedback_text = user_feedback or f"Add the new image element ({add_element}) to the design."
+
+            # If user sent a screenshot, tell Opus about it
+            screenshot_hint = ""
+            if user_screenshot_b64:
+                screenshot_hint = (
+                    "\n\n📸 USER SCREENSHOT ATTACHED: The user sent a screenshot (possibly cropped) "
+                    "showing exactly what they want changed. Look at the USER SCREENSHOT image carefully "
+                    "to understand what element they're pointing at.\n"
+                )
+
             critique_text = (
                 f"USER FEEDBACK — fix these issues in the HTML/CSS:\n\n"
                 f"[CRITICAL] user_feedback: {feedback_text}\n"
                 f"  → Fix: Apply the user's requested change to the template HTML/CSS.\n"
+                f"{screenshot_hint}"
                 f"{image_slot_info}"
             )
-            logger.info(f"[edit] Applying feedback via Opus (with reference image: {bool(reference_image_b64)}): {feedback_text[:80]}")
+            logger.info(f"[edit] Applying feedback via Opus (ref={bool(reference_image_b64)}, screenshot={bool(user_screenshot_b64)}): {feedback_text[:80]}")
             template_html = await fix_template_from_critique(
                 template_html, critique_text, new_decisions,
                 reference_image_b64=reference_image_b64,
+                user_screenshot_b64=user_screenshot_b64,
             )
 
         # Safety net: if template lost image placeholders but we have images, re-inject them
@@ -1821,6 +2013,7 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
                     template_html, retry_critique, new_decisions,
                     reference_image_b64=reference_image_b64,
                     rendered_image_path=render_result.final_image_path,
+                    user_screenshot_b64=user_screenshot_b64,
                 )
                 render_result = await render_post(
                     new_decisions, image, client_name, dynamic_html=template_html,
@@ -1848,9 +2041,9 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
         result_text = f"✅ Post edited for {client_name}\n\n✏️ Changes:\n{changes_text}"
 
         img_path = Path(render_result.final_image_path)
-        await msg.reply_photo(photo=open(img_path, "rb"), caption=result_text[:1024], read_timeout=60, write_timeout=60)
+        sent_edit_msg = await msg.reply_photo(photo=open(img_path, "rb"), caption=result_text[:1024], read_timeout=60, write_timeout=60)
 
-        _last_post_by_user[user_id] = {
+        edit_post_data = {
             "decisions": new_decisions,
             "image": image,
             "concept": post_data.get("concept"),
@@ -1861,7 +2054,12 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
             "extra_images": extra_images,
             "canvas_format": canvas_format,
         }
+        _last_post_by_user[user_id] = edit_post_data
         _persist_user_post(user_id)
+
+        # Track by message ID so user can reply to save it later
+        if sent_edit_msg:
+            _track_post_by_msg_id(sent_edit_msg.message_id, user_id, edit_post_data)
 
         return f"Post edited. Changes: {changes_text}"
 
@@ -1948,12 +2146,81 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
         }
         _persist_user_post(user_id)
 
+        # Save new image to vault
+        _vault_save_images(user_id, hero_image=new_image)
+
         return f"Image replaced ({new_image.model_used}). Same layout."
 
     except Exception as e:
         logger.error(f"Reimage failed: {e}")
         await status_msg.edit_text(f"❌ Image replacement failed: {str(e)[:200]}")
         return f"Reimage failed: {str(e)[:100]}"
+
+
+async def _exec_restore_image(params: dict, user_id: int, msg) -> str:
+    """Restore a previously used image from the vault and re-render."""
+    if user_id not in _last_post_by_user:
+        return "No recent post to restore an image to."
+
+    vault = _image_vault.get(user_id, {})
+    if not vault:
+        return "No images saved in the vault yet. The vault stores images from this session."
+
+    search = params.get("search")
+    restored_image = _vault_get(user_id, search)
+
+    if not restored_image:
+        # List what's available
+        available = [k for k in vault.keys() if not k.startswith("latest_")]
+        return f"Couldn't find a matching image. Available: {', '.join(available[:5])}"
+
+    # Check the image file still exists
+    if not Path(restored_image.image_path).exists():
+        return "The image file was cleaned up. It's no longer available."
+
+    post_data = _last_post_by_user[user_id]
+    decisions = post_data["decisions"]
+    client_name = post_data["client"]
+    template_html = post_data.get("template_html")
+    logo_b64 = post_data.get("logo_b64")
+    extra_images = post_data.get("extra_images") or []
+    canvas_format = post_data.get("canvas_format", "square")
+
+    status_msg = await msg.reply_text("🔄 Restoring image and re-rendering...")
+
+    try:
+        render_result = await render_post(
+            decisions, restored_image, client_name,
+            dynamic_html=template_html, logo_b64=logo_b64,
+            extra_images=extra_images or None, canvas_format=canvas_format,
+        )
+
+        img_path = Path(render_result.final_image_path)
+        prompt_hint = (restored_image.prompt_used or "previous image")[:50]
+        result_text = f"✅ Restored image: {prompt_hint}"
+
+        await status_msg.delete()
+        await msg.reply_photo(photo=open(img_path, "rb"), caption=result_text[:1024], read_timeout=60, write_timeout=60)
+
+        _last_post_by_user[user_id] = {
+            "decisions": decisions,
+            "image": restored_image,
+            "concept": post_data.get("concept"),
+            "client": client_name,
+            "template_html": template_html,
+            "logo_b64": logo_b64,
+            "rendered_path": render_result.final_image_path,
+            "extra_images": extra_images,
+            "canvas_format": canvas_format,
+        }
+        _persist_user_post(user_id)
+
+        return f"Image restored: {prompt_hint}"
+
+    except Exception as e:
+        logger.error(f"Restore image failed: {e}")
+        await status_msg.edit_text(f"❌ Restore failed: {str(e)[:200]}")
+        return f"Restore failed: {str(e)[:100]}"
 
 
 async def _exec_save_favorite(params: dict, user_id: int, msg) -> str:
@@ -2004,6 +2271,88 @@ async def _exec_save_favorite(params: dict, user_id: int, msg) -> str:
         logger.error(f"Save favorite failed: {e}")
         await msg.reply_text("❤️ Noted!")
         return "Saved (with minor error in details)."
+
+
+async def _exec_delete_template(params: dict, user_id: int, msg) -> str:
+    """Delete liked template(s) from memory, or blacklist a style the user hates."""
+    client_filter = params.get("client")
+    delete_all = params.get("delete_all", False)
+
+    try:
+        if delete_all:
+            brain._execute("DELETE FROM brain_entries WHERE topic = ?", ["liked_template"])
+            reply = "🗑️ Deleted ALL saved templates. Starting fresh."
+            await msg.reply_text(reply)
+            return reply
+
+        # Delete by client only
+        if client_filter and user_id not in _last_post_by_user:
+            brain._execute(
+                "DELETE FROM brain_entries WHERE topic = ? AND client = ?",
+                ["liked_template", client_filter],
+            )
+            reply = f"🗑️ Deleted all saved templates for {client_filter}."
+            await msg.reply_text(reply)
+            return reply
+
+        # Match current post against saved templates
+        last = _last_post_by_user.get(user_id)
+        if not last or not last.get("decisions"):
+            reply = "No recent post to match. Tell me which client's templates to delete, or say 'delete all templates'."
+            await msg.reply_text(reply)
+            return reply
+
+        decisions = last["decisions"]
+        post_client = client_filter or last.get("client", "ALL")
+        logger.info(f"[delete] Current post: font={decisions.font_headline}, style={decisions.template}, client={post_client}")
+
+        # Try to find and delete a saved template that matches
+        liked = brain.query(topic="liked_template", limit=50)
+        deleted = 0
+        for entry in liked:
+            try:
+                data = json.loads(entry["content"])
+                matches_font = data.get("font_headline") == decisions.font_headline
+                matches_style = data.get("template_style") == decisions.template
+                matches_client = (not client_filter) or entry.get("client") == client_filter
+
+                if matches_font and matches_style and matches_client:
+                    entry_id = entry.get("id")
+                    if entry_id:
+                        brain._execute("DELETE FROM brain_entries WHERE id = ?", [int(entry_id)])
+                        deleted += 1
+                        logger.info(f"Deleted liked template id={entry_id}: {data.get('template_style')} + {data.get('font_headline')}")
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        if deleted > 0:
+            reply = f"🗑️ Deleted {deleted} saved template(s) matching this style ({decisions.template} + {decisions.font_headline}). Won't use it again."
+        else:
+            # This design was never saved as liked — blacklist it so the bot avoids it
+            blacklist_data = {
+                "template_style": decisions.template,
+                "font_headline": decisions.font_headline,
+                "color_bg": decisions.color_bg,
+                "color_accent": decisions.color_accent,
+                "reason": "User disliked this style",
+            }
+            brain.store(
+                topic="disliked_template",
+                source="user_feedback",
+                content=json.dumps(blacklist_data),
+                client=post_client,
+                summary=f"Disliked: {decisions.template} + {decisions.font_headline}",
+                tags=["disliked", decisions.template, decisions.font_headline],
+            )
+            logger.info(f"[delete] No matching liked template — blacklisted: {decisions.template} + {decisions.font_headline}")
+            reply = f"🚫 This style ({decisions.template} + {decisions.font_headline}) wasn't in your saved favorites, but I've blacklisted it — I won't use this combo again."
+
+        await msg.reply_text(reply)
+        return reply
+
+    except Exception as e:
+        logger.error(f"Delete template failed: {e}")
+        return f"Failed to delete: {str(e)[:100]}"
 
 
 async def _exec_process_feedback(params: dict, user_id: int) -> str:
@@ -2471,8 +2820,22 @@ async def _run_tool_use_loop(user_id: int, msg) -> None:
             tool_results = []
             assistant_content = response.content
 
+            # Guard: detect conflicting tool calls in the same turn
+            tool_names_this_turn = [b.name for b in response.content if b.type == "tool_use"]
+            has_edit = "edit_post" in tool_names_this_turn
+            has_replace = "replace_image" in tool_names_this_turn
+            skip_replace = has_edit and has_replace  # edit_post already handles it
+
             for block in response.content:
                 if block.type == "tool_use":
+                    if skip_replace and block.name == "replace_image":
+                        logger.warning(f"[tool-use] Skipping replace_image — edit_post already called in same turn")
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": "Skipped — edit_post already handles this request. No second post needed.",
+                        })
+                        continue
                     logger.info(f"[tool-use] Claude called {block.name}")
                     result = await _execute_tool(block.name, block.input, user_id, msg)
                     tool_results.append({
@@ -2571,6 +2934,37 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # Restore session from DB if this is first message after restart
     _restore_user_session(user_id)
+
+    # Check if the user is replying to an old post (to save/edit/reuse it)
+    replied_post = None
+    if msg.reply_to_message:
+        reply_msg_id = msg.reply_to_message.message_id
+        replied_post = _posts_by_msg_id.get(reply_msg_id)
+        if replied_post:
+            # Load this old post as the "current" post so save/edit tools work on it
+            post_data = {k: v for k, v in replied_post.items() if k != "_user_id"}
+            _last_post_by_user[user_id] = post_data
+            logger.info(f"[text] User replied to tracked post msg_id={reply_msg_id} — loaded as current post")
+
+            # Also save the old post's rendered image as the latest reference
+            # so "make this" / "use this template" triggers copy-mode generation
+            import base64 as _b64
+            rendered_path = post_data.get("rendered_path")
+            if rendered_path and Path(rendered_path).exists():
+                try:
+                    img_b64 = _b64.b64encode(Path(rendered_path).read_bytes()).decode("utf-8")
+                    _last_analysis_by_user[user_id] = {"_image_b64": img_b64}
+                    logger.info(f"[text] Loaded rendered image as reference for reuse")
+                except Exception:
+                    pass
+
+            client = replied_post.get('client', '?')
+            text = (
+                f"[Replying to a previous post for {client}. "
+                f"The post's rendered image is now stored as the latest reference. "
+                f"If the user wants to generate a new post using this style/template, "
+                f"call generate_post with use_last_inspiration=true and client='{client}'.] {text}"
+            )
 
     _bump_message_counter(user_id)
     _add_to_history(user_id, "user", text)
