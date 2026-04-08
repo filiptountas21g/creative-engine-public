@@ -884,6 +884,14 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "REQUIRED when the user describes what they want. What the new image should show — "
+                        "e.g. 'skyscrapers at sunset', 'business people in a meeting', 'abstract tech pattern'. "
+                        "Extract this directly from the user's message. If not provided, reuses the original concept."
+                    ),
+                },
                 "image_source": {
                     "type": "string",
                     "enum": ["auto", "stock", "ai"],
@@ -2113,7 +2121,8 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
     try:
         image_source = params.get("image_source", "auto")
         background_style = params.get("background_style")
-        pipeline_input = PipelineInput(client=client_name, brief=concept.object)
+        user_description = params.get("description")
+        pipeline_input = PipelineInput(client=client_name, brief=user_description or concept.object)
         brain_ctx = await brain_read(pipeline_input, brain)
 
         if background_style:
@@ -2128,6 +2137,18 @@ async def _exec_replace_image(params: dict, user_id: int, msg) -> str:
             )
             await status_msg.edit_text(f"🎨 Generating AI background: {background_style[:60]}...")
             new_image = await generate_image(bg_concept, brain_ctx, image_source="ai")
+        elif user_description:
+            # User described what they want — override the concept
+            from dataclasses import replace as dc_replace
+            new_concept = dc_replace(
+                concept,
+                object=user_description,
+                why=f"User requested: {user_description}",
+                composition_note=concept.composition_note,
+            )
+            await status_msg.edit_text(f"🔍 Searching for: {user_description[:60]}...")
+            new_image = await generate_image(new_concept, brain_ctx, image_source=image_source)
+            logger.info(f"[replace] Used user description: {user_description}")
         else:
             new_image = await generate_image(concept, brain_ctx, image_source=image_source)
         await status_msg.edit_text(f"🖼️ Got new image ({new_image.model_used}), re-rendering...")
