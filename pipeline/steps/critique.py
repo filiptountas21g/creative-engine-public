@@ -105,14 +105,14 @@ async def critique_render(
             f"Do NOT suggest changing the layout to something different from the reference."
         )
 
-    # Build taste context — reviewer checks if design matches current aesthetic
+    # Build taste context — lightweight reference, NOT a hard constraint
     taste_section = ""
     if taste_context:
         taste_section = (
-            f"\n\nDESIGNER'S CURRENT TASTE PROFILE (recent preferences weighted higher):\n"
+            f"\n\nDESIGNER'S SAVED FAVORITES (for context only — do NOT force the design to match these):\n"
             f"{taste_context}\n"
-            f"Consider whether this design feels aligned with this aesthetic. "
-            f"If it's drifting away from these preferences without a good reason, flag it."
+            f"This is background info. Focus your critique on VISUAL QUALITY (readability, spacing, hierarchy, "
+            f"color harmony) — NOT on whether the design matches past favorites. Variety is good."
         )
 
     # Build client brand context

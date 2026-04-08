@@ -230,86 +230,70 @@ def _recency_weight(created_at: str) -> float:
 
 
 def _get_taste_description(brain: Brain, client: str = None) -> str:
-    """Get the user's taste profile as natural language, with recency weighting.
+    """Get the user's taste profile from liked_template entries (actual saved designs).
 
-    Recent approvals count more — if you've been into minimalism lately,
-    that shows up stronger than editorial layouts you liked 3 months ago.
+    Pulls directly from what the user explicitly saved as favorites —
+    not old taste_reference analysis. This matches what brain_read.py uses.
 
     If client is provided, also pulls client-specific brand preferences.
     """
     try:
-        refs = brain.query(topic="taste_reference", limit=50)
-        if not refs:
+        liked = brain.query(topic="liked_template", limit=20)
+        if not liked:
             return ""
 
-        # Extract patterns with recency weighting
         from collections import defaultdict
         fonts: dict = defaultdict(float)
-        compositions: dict = defaultdict(float)
-        moods: dict = defaultdict(float)
-        colors: dict = defaultdict(float)
-        rules: dict = defaultdict(float)
+        templates: dict = defaultdict(float)
+        colors_bg: dict = defaultdict(float)
+        colors_accent: dict = defaultdict(float)
 
-        for ref in refs:
+        for entry in liked:
             try:
-                weight = _recency_weight(ref.get("created_at", ""))
-                data = json.loads(ref.get("content", "{}"))
+                weight = _recency_weight(entry.get("created_at", ""))
+                data = json.loads(entry.get("content", "{}"))
 
-                # Typography — list of dicts
-                typo = data.get("typography", [])
-                if isinstance(typo, list):
-                    for elem in typo:
-                        cat = elem.get("font_category", "")
-                        if cat:
-                            fonts[cat] += weight
-                elif isinstance(typo, dict):
-                    cat = typo.get("font_category", "")
-                    if cat:
-                        fonts[cat] += weight
+                if data.get("font_headline"):
+                    font_desc = f"{data['font_headline']} {data.get('font_headline_weight', 700)}"
+                    fonts[font_desc] += weight
 
-                # Composition
-                comp = data.get("composition", {})
-                if isinstance(comp, dict) and comp.get("template_match"):
-                    compositions[comp["template_match"]] += weight
+                if data.get("template_style"):
+                    templates[data["template_style"]] += weight
 
-                # Feeling / mood
-                feeling = data.get("feeling", {})
-                if isinstance(feeling, dict) and feeling.get("mood"):
-                    moods[feeling["mood"]] += weight
+                if data.get("color_bg"):
+                    colors_bg[data["color_bg"]] += weight
 
-                # Colors
-                color_data = data.get("colors", {})
-                if isinstance(color_data, dict):
-                    temp = color_data.get("temperature", "")
-                    if temp:
-                        colors[temp] += weight
-                    palette_mood = color_data.get("palette_mood", "")
-                    if palette_mood:
-                        colors[palette_mood] += weight
-
-                # Reusable rules
-                for rule in data.get("reusable_rules", []):
-                    if isinstance(rule, str) and len(rule) > 10:
-                        rules[rule] += weight
+                if data.get("color_accent"):
+                    colors_accent[data["color_accent"]] += weight
 
             except (json.JSONDecodeError, KeyError, TypeError):
                 continue
 
-        # Sort by weighted score (most recent/frequent first)
         def top(d: dict, n: int) -> list:
             return [k for k, _ in sorted(d.items(), key=lambda x: -x[1])[:n]]
 
         parts = []
         if fonts:
-            parts.append(f"Typography: {', '.join(top(fonts, 3))}")
-        if compositions:
-            parts.append(f"Layouts: {', '.join(top(compositions, 3))}")
-        if moods:
-            parts.append(f"Mood: {', '.join(top(moods, 3))}")
-        if colors:
-            parts.append(f"Colors: {', '.join(top(colors, 3))}")
-        if rules:
-            parts.append(f"Design rules: {'; '.join(top(rules, 3))}")
+            parts.append(f"Liked fonts: {', '.join(top(fonts, 4))}")
+        if templates:
+            parts.append(f"Liked layouts: {', '.join(top(templates, 3))}")
+        if colors_bg:
+            parts.append(f"Liked bg colors: {', '.join(top(colors_bg, 3))}")
+        if colors_accent:
+            parts.append(f"Liked accents: {', '.join(top(colors_accent, 3))}")
+
+        # Also pull disliked templates (avoid list)
+        disliked = brain.query(topic="disliked_template", limit=10)
+        avoid = []
+        for entry in disliked:
+            try:
+                data = json.loads(entry.get("content", "{}"))
+                combo = f"{data.get('template_style', '?')}+{data.get('font_headline', '?')}"
+                avoid.append(combo)
+            except (json.JSONDecodeError, KeyError):
+                continue
+        if avoid:
+            parts.append(f"Avoid these combos: {', '.join(avoid[:5])}")
 
         taste = "; ".join(parts) if parts else ""
 
