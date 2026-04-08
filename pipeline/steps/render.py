@@ -46,6 +46,15 @@ def _inject_into_template(
     html = html.replace("{{CTA}}", decisions.cta)
     html = html.replace("{{CLIENT_NAME}}", client_name.upper())
 
+    # Replace hardcoded text from old decisions (dynamic templates don't use placeholders)
+    if original_decisions:
+        if original_decisions.headline and original_decisions.headline != decisions.headline:
+            html = html.replace(original_decisions.headline, decisions.headline)
+        if original_decisions.subtext and original_decisions.subtext != decisions.subtext:
+            html = html.replace(original_decisions.subtext, decisions.subtext)
+        if original_decisions.cta and original_decisions.cta != decisions.cta:
+            html = html.replace(original_decisions.cta, decisions.cta)
+
     # Images — embed as base64 data URIs so they always load in Playwright
     import base64
 
