@@ -1831,6 +1831,29 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
         if not add_element:
             add_element = changes.pop("add_image_prompt", None)
 
+        # Auto-generate feedback for color changes — CSS variables alone don't work
+        # when dynamic templates have full-bleed images or hardcoded colors in divs/overlays.
+        # Opus needs to actually edit the HTML to make color changes visible.
+        color_feedback_parts = []
+        if "color_bg" in changes and changes["color_bg"] != decisions.color_bg:
+            color_feedback_parts.append(
+                f"Change the VISIBLE background color to {changes['color_bg']}. "
+                f"If an image covers the background, add a colored overlay or tint. "
+                f"Make sure {changes['color_bg']} is clearly visible as the dominant background color."
+            )
+        if "color_accent" in changes and changes["color_accent"] != decisions.color_accent:
+            color_feedback_parts.append(
+                f"Change accent/highlight elements to {changes['color_accent']}."
+            )
+        if "color_text" in changes and changes["color_text"] != decisions.color_text:
+            color_feedback_parts.append(
+                f"Change text color to {changes['color_text']}."
+            )
+        if color_feedback_parts:
+            color_feedback = " ".join(color_feedback_parts)
+            user_feedback = f"{user_feedback} {color_feedback}" if user_feedback else color_feedback
+            logger.info(f"[edit] Auto-generated color feedback for Opus: {color_feedback[:100]}")
+
         # Apply changes to decisions
         new_decisions = replace(decisions, **{
             k: v for k, v in changes.items()
