@@ -716,7 +716,32 @@ def _get_history_for_api(user_id: int) -> list[dict]:
         else:
             merged.append(msg)
 
-    return merged
+    # Step 4: FINAL re-validation — Step 2 may have removed assistants that Step 1
+    # already validated tool_results against, leaving orphaned tool_results after merge.
+    validated = []
+    for msg in merged:
+        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+            prev_tool_use_ids = set()
+            if validated and validated[-1].get("role") == "assistant":
+                prev_content = validated[-1].get("content", [])
+                if isinstance(prev_content, list):
+                    for block in prev_content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
+                            prev_tool_use_ids.add(block["id"])
+            filtered = []
+            for block in msg["content"]:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    if block.get("tool_use_id") not in prev_tool_use_ids:
+                        logger.warning(f"[final-sanitize] Dropping stale tool_result {block.get('tool_use_id')}")
+                        continue
+                filtered.append(block)
+            if not filtered:
+                continue
+            validated.append({**msg, "content": filtered})
+        else:
+            validated.append(msg)
+
+    return validated
 
 
 # ── Tool Definitions ──────────────────────────────────────
