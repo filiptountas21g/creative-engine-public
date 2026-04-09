@@ -145,14 +145,19 @@ async def generate_dynamic_template(
             logger.info("Using saved Drive template as base — Opus will adapt it")
             return await _adapt_saved_template(drive_templates, decisions, has_logo)
 
-        # Get all inspiration references
-        refs = brain.query(topic="taste_reference", limit=50)
-
-        # Get liked templates (higher priority)
+        # Use ONLY liked templates — old taste_references are deprecated
         liked = brain.query(topic="liked_template", limit=20)
 
-        # Pick a reference to inspire the layout
-        reference_text = _pick_reference(refs, liked, decisions.template, previous_templates)
+        # Pick a liked template to inspire the layout
+        if liked:
+            entry = random.choice(liked)
+            try:
+                data = json.loads(entry["content"])
+                reference_text = _format_reference(data, source="liked")
+            except (json.JSONDecodeError, KeyError):
+                reference_text = "No inspiration references available. Create a clean, modern editorial layout."
+        else:
+            reference_text = "No inspiration references available. Create a clean, modern editorial layout."
 
     # Build the prompt
     avoid_text = ""
@@ -342,10 +347,10 @@ Return the complete HTML file."""
         required = ["{{HEADLINE}}", "{{SUBTEXT}}", "{{CLIENT_NAME}}"]
         missing = [p for p in required if p not in html]
         if not has_any_image:
-            logger.warning("No image placeholder found — patching with {{IMAGE_1}}")
+            logger.warning("No image placeholder found — patching with {{IMAGE_1}} as full-bleed background")
             html = html.replace(
                 "</body>",
-                '<img src="{{IMAGE_1}}" style="position:absolute;top:0;right:0;width:50%;height:100%;object-fit:cover;" alt="hero">\n</body>'
+                '<img src="{{IMAGE_1}}" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:0;" alt="hero">\n</body>'
             )
         if missing:
             logger.warning(f"Dynamic template missing placeholders: {missing} — patching...")
