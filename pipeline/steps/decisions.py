@@ -66,10 +66,17 @@ Return ONLY valid JSON:
   "headline_margin_y": 64,
   "headline_max_width": "75%",
   "image_padding": 100,
+  "remove_background": false,
   "template": "object-hero",
   "subtext": "chosen subtext",
   "cta": "chosen CTA"
-}"""
+}
+
+IMPORTANT about remove_background:
+  Set to true when the AI-generated image is a SINGLE OBJECT/PRODUCT/PERSON that should float
+  on the template's background color (e.g. object-hero with colored bg, product shots).
+  Set to false when the image is a full scene, landscape, or should keep its own background
+  (e.g. full-bleed, atmospheric photos, scenes with environment)."""
 
 
 def _format_client_prefs(prefs: dict | None, client: str) -> str:
@@ -171,13 +178,16 @@ Image generated with: {image.model_used if image else 'TBD — image generated a
 
 {font_instruction}
 
-TASTE PREFERENCES:
-  Preferred fonts: {', '.join(taste.get('preferred_fonts', []))}
-  Preferred color temperatures: {', '.join(taste.get('preferred_color_temperatures', []))}
-  Preferred compositions: {', '.join(taste.get('preferred_compositions', []))}
-  Preferred moods: {', '.join(taste.get('preferred_moods', []))}
-  Confirmed rules: {', '.join(taste.get('confirmed_rules', [])[:5])}
-  Avoid: {', '.join(taste.get('avoid', []))}
+TASTE PREFERENCES (MUST FOLLOW — these are designs the user explicitly approved):
+  APPROVED fonts: {', '.join(taste.get('preferred_fonts', []))} — ONLY use these fonts unless none fit.
+  APPROVED templates: {', '.join(taste.get('preferred_compositions', []))} — ONLY use these layouts.
+  APPROVED colors: {', '.join(taste.get('preferred_colors', []))}
+  BLACKLISTED (user hated these): {', '.join(taste.get('avoid', []))}
+
+LIKED TEMPLATES (the user saved these as favorites — match this style):
+{chr(10).join(f"  • {t.get('template_style','?')} | {t.get('font_headline','?')} {t.get('font_headline_weight','')} | bg:{t.get('color_bg','?')} accent:{t.get('color_accent','?')} | \"{t.get('headline','')[:40]}\"" for t in taste.get('liked_templates_raw', [])[:5])}
+
+CRITICAL: Pick font + template + colors FROM the liked templates above. Do NOT invent new combinations the user hasn't approved.
 
 Brand tone: {brain_ctx.brand.get('tone', 'professional')}
 
@@ -235,6 +245,7 @@ Return only the JSON with all decisions."""
             headline_margin_y=data.get("headline_margin_y", 64),
             headline_max_width=data.get("headline_max_width", "75%"),
             image_padding=data.get("image_padding", 100),
+            remove_background=data.get("remove_background", False),
             template=input.template_override or data.get("template", "object-hero"),
             subtext=data.get("subtext", copy.subtext),
             cta=data.get("cta", copy.cta),
