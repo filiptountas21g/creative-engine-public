@@ -417,6 +417,12 @@ async def _judge_stock_photos(
                 raw = raw[:-3]
             raw = raw.strip()
 
+        # Robust JSON extraction — Sonnet sometimes wraps JSON in extra text
+        import re as _re
+        json_match = _re.search(r'\{[^{}]*"winner"\s*:\s*-?\d+[^{}]*\}', raw, _re.DOTALL)
+        if json_match:
+            raw = json_match.group(0)
+
         result = json.loads(raw)
         winner_idx = result.get("winner", -1)
         confidence = result.get("confidence", "low")
@@ -877,6 +883,12 @@ async def _judge_stock_photos_batch(
             if raw.endswith("```"):
                 raw = raw[:-3]
             raw = raw.strip()
+
+        # Robust JSON extraction — Sonnet sometimes wraps JSON in extra text
+        import re as _re
+        json_match = _re.search(r'\{[^{}]*"winners"\s*:\s*\[[^\]]*\][^{}]*\}', raw, _re.DOTALL)
+        if json_match:
+            raw = json_match.group(0)
 
         result = json.loads(raw)
         winner_indices = result.get("winners", [])
