@@ -15,7 +15,7 @@ PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 # Model names
 OPUS_MODEL = os.getenv("OPUS_MODEL", "claude-opus-4-1-20250805")
 SONNET_MODEL = os.getenv("SONNET_MODEL", "claude-sonnet-4-20250514")
-VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-1-20250805")
+VISION_MODEL = os.getenv("VISION_MODEL", "claude-sonnet-4-20250514")
 
 # ── Telegram ───────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
