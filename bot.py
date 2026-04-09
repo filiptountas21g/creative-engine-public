@@ -2063,7 +2063,10 @@ async def _exec_edit_post(changes: dict, user_id: int, msg) -> str:
                     f"The user asked: \"{user_feedback}\"\n"
                     f"This was NOT applied. Vision says: {check.get('what_i_see', '')}\n\n"
                     f"[CRITICAL] user_feedback: {fix_instruction}\n"
-                    f"  → Fix: {fix_instruction}\n"
+                    f"  → Fix: {fix_instruction}\n\n"
+                    f"⚠️ SAFETY: Do NOT remove the headline, subtext, CTA, hero image, or any core content. "
+                    f"Only make the MINIMUM change needed. If unsure what to remove, hide it with display:none "
+                    f"rather than deleting HTML elements. The fix must be SURGICAL — do not rewrite the template."
                 )
                 template_html = await fix_template_from_critique(
                     template_html, retry_critique, new_decisions,
