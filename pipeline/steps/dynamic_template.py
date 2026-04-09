@@ -653,7 +653,7 @@ async def describe_element_for_generation(
 
     try:
         response = _client.messages.create(
-            model=config.OPUS_MODEL,
+            model=config.SONNET_MODEL,
             max_tokens=500,
             system=(
                 "You are an expert at writing AI image generation prompts. "

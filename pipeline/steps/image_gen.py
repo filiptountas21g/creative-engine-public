@@ -508,7 +508,7 @@ IMPORTANT: Do NOT include any text in the prompt. The template system handles al
 
     try:
         response = _client.messages.create(
-            model=config.OPUS_MODEL,
+            model=config.SONNET_MODEL,
             max_tokens=1024,
             system=PROMPT_WRITER_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],

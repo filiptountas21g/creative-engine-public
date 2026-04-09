@@ -87,7 +87,7 @@ Return only the JSON object."""
 
     try:
         response = _client.messages.create(
-            model=config.OPUS_MODEL,
+            model=config.SONNET_MODEL,
             max_tokens=1024,
             system=CONCEPT_SYSTEM,
             messages=[{"role": "user", "content": user_msg}],
