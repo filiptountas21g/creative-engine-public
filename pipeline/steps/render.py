@@ -287,6 +287,145 @@ async def render(
     )
 
 
+async def diagnose_layout(html: str, canvas_format: str = "square") -> dict:
+    """
+    Render the HTML headlessly and extract bounding boxes of every significant element.
+    Returns a dict with elements[] and detected overlaps[], for passing to Opus during retry.
+
+    Uses Playwright's getBoundingClientRect + getComputedStyle to capture real positioning data
+    so Opus can fix overlaps with concrete numbers instead of visual guessing.
+    """
+    from playwright.async_api import async_playwright
+
+    canvas_w, canvas_h = _canvas_size(canvas_format)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(args=["--no-sandbox", "--disable-setuid-sandbox"])
+        page = await browser.new_page(viewport={"width": canvas_w, "height": canvas_h})
+        await page.set_content(html, wait_until="networkidle")
+        await page.wait_for_timeout(500)
+
+        # Extract bounding boxes + positioning strategy of all visible, significant elements
+        elements = await page.evaluate("""
+            () => {
+                const results = [];
+                // Prioritize elements with semantic roles, fall back to common tags
+                const selectors = [
+                    '[data-role]',
+                    'h1, h2, h3, p, span',
+                    'img',
+                    '[class*="headline"], [class*="title"], [class*="subtitle"],'
+                    + '[class*="subtext"], [class*="cta"], [class*="logo"]',
+                ];
+                const seen = new Set();
+                for (const sel of selectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        if (seen.has(el)) return;
+                        seen.add(el);
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width < 5 || rect.height < 5) return;  // skip invisible
+                        const style = window.getComputedStyle(el);
+                        if (style.display === 'none' || style.visibility === 'hidden') return;
+
+                        // Build a short identifier
+                        const role = el.getAttribute('data-role') || '';
+                        const cls = (el.className && typeof el.className === 'string')
+                            ? el.className.split(' ').filter(c => c).slice(0, 2).join('.')
+                            : '';
+                        const id = el.id ? `#${el.id}` : '';
+                        const tag = el.tagName.toLowerCase();
+                        const label = role || id || (cls ? `${tag}.${cls}` : tag);
+                        const text = (el.textContent || '').trim().slice(0, 40);
+
+                        results.push({
+                            label,
+                            tag,
+                            role,
+                            text: text || null,
+                            x: Math.round(rect.x),
+                            y: Math.round(rect.y),
+                            w: Math.round(rect.width),
+                            h: Math.round(rect.height),
+                            bottom: Math.round(rect.y + rect.height),
+                            right: Math.round(rect.x + rect.width),
+                            position: style.position,
+                            top_css: style.top,
+                            left_css: style.left,
+                            bottom_css: style.bottom,
+                            right_css: style.right,
+                            z_index: style.zIndex,
+                            font_size: style.fontSize,
+                            overflow: style.overflow,
+                        });
+                    });
+                }
+                return results;
+            }
+        """)
+
+        await browser.close()
+
+    # Detect overlapping element pairs (text elements only — images overlaying text is often intentional)
+    overlaps = []
+    text_like = [e for e in elements if e["tag"] in ("h1", "h2", "h3", "p", "span") or "text" in (e.get("role") or "").lower() or (e.get("text") and len(e["text"]) > 0)]
+    for i, a in enumerate(text_like):
+        for b in text_like[i + 1:]:
+            # Check bounding box intersection
+            x_overlap = max(0, min(a["right"], b["right"]) - max(a["x"], b["x"]))
+            y_overlap = max(0, min(a["bottom"], b["bottom"]) - max(a["y"], b["y"]))
+            if x_overlap > 10 and y_overlap > 10:
+                # Don't flag parent/child relationships
+                if (a["x"] <= b["x"] and a["y"] <= b["y"] and a["right"] >= b["right"] and a["bottom"] >= b["bottom"]):
+                    continue
+                if (b["x"] <= a["x"] and b["y"] <= a["y"] and b["right"] >= a["right"] and b["bottom"] >= a["bottom"]):
+                    continue
+                overlaps.append({
+                    "a": a["label"],
+                    "b": b["label"],
+                    "a_text": a.get("text"),
+                    "b_text": b.get("text"),
+                    "x_overlap_px": x_overlap,
+                    "y_overlap_px": y_overlap,
+                    "a_position": a["position"],
+                    "b_position": b["position"],
+                })
+
+    logger.info(f"[diagnose] {len(elements)} elements, {len(overlaps)} overlaps detected")
+    return {"elements": elements, "overlaps": overlaps, "canvas": {"w": canvas_w, "h": canvas_h}}
+
+
+def _format_layout_diagnosis(diag: dict) -> str:
+    """Format layout diagnosis dict into a compact string for Opus prompts."""
+    lines = [f"LAYOUT DIAGNOSIS (canvas {diag['canvas']['w']}x{diag['canvas']['h']}):"]
+
+    if diag["overlaps"]:
+        lines.append("\n⚠️ DETECTED OVERLAPS (must fix):")
+        for o in diag["overlaps"]:
+            a_text = f' "{o["a_text"][:30]}"' if o.get("a_text") else ""
+            b_text = f' "{o["b_text"][:30]}"' if o.get("b_text") else ""
+            lines.append(
+                f"  • `{o['a']}`{a_text} (position:{o['a_position']}) overlaps `{o['b']}`{b_text} (position:{o['b_position']}) "
+                f"by {o['x_overlap_px']}px horizontally, {o['y_overlap_px']}px vertically"
+            )
+            # Give a concrete fix hint based on positioning
+            if o["a_position"] == "absolute" or o["b_position"] == "absolute":
+                lines.append(f"    → CHANGE `top:` or `bottom:` CSS values (margin won't work — elements are position:absolute)")
+            else:
+                lines.append(f"    → Add margin/gap or adjust flex alignment")
+
+    lines.append("\nELEMENT POSITIONS:")
+    for e in diag["elements"][:20]:  # cap to avoid prompt bloat
+        text_hint = f' "{e["text"][:25]}"' if e.get("text") else ""
+        pos_info = f"position:{e['position']}"
+        if e["position"] == "absolute":
+            pos_info += f", top:{e['top_css']}, left:{e['left_css']}"
+        lines.append(
+            f"  `{e['label']}`{text_hint} → bbox(x={e['x']}, y={e['y']}, w={e['w']}, h={e['h']}), {pos_info}"
+        )
+
+    return "\n".join(lines)
+
+
 def _fallback_template(canvas_w: int = 1080, canvas_h: int = 1080) -> str:
     """Minimal fallback template when no generated templates exist yet."""
     return """<!DOCTYPE html>

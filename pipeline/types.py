@@ -84,6 +84,7 @@ class CreativeDecisions:
     headline_margin_y: int = 64
     headline_max_width: str = "75%"
     image_padding: int = 100
+    remove_background: bool = False
     template: str = "object-hero"
     subtext: str = ""
     cta: str = ""

@@ -478,6 +478,10 @@ DESIGN DECISIONS (for reference):
   Colors: bg={decisions.color_bg}, text={decisions.color_text}, accent={decisions.color_accent}
   Template style: {decisions.template}
 
+CRITICAL — PRESERVE THESE PLACEHOLDERS (copy them exactly, do NOT replace with actual text):
+  {{{{HEADLINE}}}}  {{{{SUBTEXT}}}}  {{{{CTA}}}}  {{{{CLIENT_NAME}}}}  {{{{IMAGE_1}}}}  {{{{LOGO_B64}}}}
+If any of these appear in the current HTML, they MUST appear in your output.
+
 Apply ALL the fixes mentioned in the review. Return the complete fixed HTML."""
 
     try:

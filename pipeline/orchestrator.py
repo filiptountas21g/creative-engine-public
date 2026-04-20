@@ -10,7 +10,7 @@ import logging
 import time
 
 from brain.client import Brain
-from pipeline.types import PipelineInput, PipelineResult, CreativeDecisions
+from pipeline.types import PipelineInput, PipelineResult, CreativeDecisions, ImageResult
 from pipeline.steps.research import research
 from pipeline.steps.brain_read import brain_read
 from pipeline.steps.concept import creative_concept
@@ -72,8 +72,8 @@ async def run_pipeline(
         if on_progress:
             try:
                 await on_progress(step, msg)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"on_progress callback failed for step={step}: {e}")
 
     try:
         # Step 1: Research
@@ -355,6 +355,21 @@ async def run_pipeline(
                 result.hero_image = image
                 await _notify("image", f"Image ready ({image.model_used})")
 
+                # Remove background if decisions say so
+                if decisions and decisions.remove_background and image.image_path:
+                    from pipeline.steps.image_gen import remove_background
+                    await _notify("image", "Removing background...")
+                    new_path = await remove_background(image.image_path)
+                    if new_path != image.image_path:
+                        image = ImageResult(
+                            image_path=new_path,
+                            image_url=image.image_url,
+                            model_used=image.model_used,
+                            prompt_used=image.prompt_used,
+                        )
+                        result.hero_image = image
+                        logger.info(f"Background removed for hero image")
+
                 # Generate extra images for multi-slot templates
                 slot_nums = set()
                 for m in re.finditer(r'\{\{IMAGE_(\d+)\}\}', dynamic_html):
@@ -376,7 +391,7 @@ async def run_pipeline(
 
         if is_copy_mode:
             # COPY MODE: Comparison loop — visual diff against reference, not aesthetic judgment
-            COPY_MAX_REVISIONS = 1
+            COPY_MAX_REVISIONS = 2
             reference_b64 = forced_reference["_image_b64"]
             canvas_fmt = getattr(input, "format", "square")
 
@@ -511,8 +526,8 @@ async def run_carousel(
         if on_progress:
             try:
                 await on_progress(step, msg)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"on_progress callback failed for step={step}: {e}")
 
     results = []
 
@@ -595,8 +610,8 @@ async def _generate_carousel_slide(
         if on_progress:
             try:
                 await on_progress(step, msg)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"on_progress callback failed for step={step}: {e}")
 
     try:
         # Always generate fresh concept

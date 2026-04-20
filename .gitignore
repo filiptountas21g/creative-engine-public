@@ -1,0 +1,58 @@
+# Secrets & credentials
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+token.json
+google_credentials.json
+google_token.json
+service_account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Output / generated
+output/
+*.png
+*.jpg
+*.jpeg
+!templates/**/*.png
+!templates/**/*.jpg
+*.html
+!templates/**/*.html
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Railway
+.railway/

@@ -85,12 +85,13 @@ class DriveWatcher:
                 )
                 try:
                     # Send photo + analysis
-                    msg = await self.bot.send_photo(
-                        chat_id=config.TELEGRAM_CHAT_ID,
-                        photo=open(tmp_path, "rb"),
-                        caption=message_text[:1024],  # Telegram caption limit
-                        parse_mode="HTML",
-                    )
+                    with open(tmp_path, "rb") as photo_fh:
+                        msg = await self.bot.send_photo(
+                            chat_id=config.TELEGRAM_CHAT_ID,
+                            photo=photo_fh,
+                            caption=message_text[:1024],  # Telegram caption limit
+                            parse_mode="HTML",
+                        )
                     # If analysis is longer than caption, send rest as text
                     if len(message_text) > 1024:
                         await self.bot.send_message(

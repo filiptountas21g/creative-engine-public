@@ -101,8 +101,8 @@ async def decompose_reference(image_b64: str, media_type: str = "image/jpeg") ->
             media_type = "image/png"
         elif raw[:3] == b'GIF':
             media_type = "image/gif"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"media-type detection from magic bytes failed: {e}")
 
     user_prompt = f"""Decompose this reference image into individual elements.
 

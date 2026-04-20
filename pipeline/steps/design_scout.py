@@ -199,10 +199,10 @@ def _get_seen_urls(brain: Brain) -> set:
             try:
                 urls = json.loads(entry.get("content", "[]"))
                 seen.update(urls)
-            except (json.JSONDecodeError, TypeError):
-                pass
-    except Exception:
-        pass
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug(f"Failed to parse scout_seen_urls entry: {e}")
+    except Exception as e:
+        logger.debug(f"Failed to load seen scout URLs from Brain: {e}")
     return seen
 
 
@@ -416,8 +416,8 @@ def _build_scout_queries(brain: Brain, industry: str, staleness: dict = None, se
             if reasons:
                 rejection_hint = f"User has previously rejected scout results for: {'; '.join(reasons[:5])}. Avoid these."
                 logger.info(f"Scout rejection history: {rejection_hint}")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to load scout rejection history: {e}")
 
     exclude_hint = ""
     if seen_urls:
@@ -606,8 +606,8 @@ async def scout_search(
     for entry in brain.query(topic="scout_seen_urls", limit=10):
         try:
             seen_image_urls.update(json.loads(entry.get("content", "[]")))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to parse scout_seen_urls entry id={entry.get('id')}: {e}")
 
     # Claude builds queries optimised for Google Image search
     queries = _build_scout_queries(brain, industry, staleness, seen_urls, user_focus, client=client)

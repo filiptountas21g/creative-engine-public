@@ -6,7 +6,7 @@ load_dotenv(override=True)
 # ── AI Models ──────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
-SERPER_API_KEY = os.getenv("SERPER_API_KEY", "3bfbe7cb7f9e8b80dfad7c063b5f7fe85385dc48")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 FAL_KEY = os.getenv("FAL_KEY", "")
 IDEOGRAM_API_KEY = os.getenv("IDEOGRAM_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")

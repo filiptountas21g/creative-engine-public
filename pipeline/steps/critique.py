@@ -338,44 +338,51 @@ async def check_edit_applied(
 COMPARISON_SYSTEM = """You are a visual QA engineer comparing a rendered HTML reproduction against its reference design.
 
 You receive TWO images:
-- IMAGE A: The original reference design (the target)
+- IMAGE A: The original reference design (the target layout to replicate)
 - IMAGE B: The rendered reproduction (what was produced)
 
-Your job: identify EVERY visual difference between A and B.
-You are NOT judging quality, aesthetics, or whether this is a good design.
-You are ONLY finding differences — like a visual diff tool.
+CRITICAL: The reproduction has DIFFERENT text content, DIFFERENT brand colors, and a DIFFERENT image
+than the reference. This is expected — we are replicating the LAYOUT and STRUCTURE, not the content.
 
-Focus on:
-1. MISSING ELEMENTS — things in the reference that are not in the render
-2. EXTRA ELEMENTS — things in the render that are not in the reference
-3. POSITION ERRORS — elements that exist in both but are in different positions
-4. SIZE ERRORS — elements that are the wrong size relative to the reference
-5. COLOR DIFFERENCES — only if the color ROLE is wrong (dark where light should be, accent where background should be). The reproduction intentionally uses different brand colors, so don't flag color changes that preserve the same visual role.
-6. SPACING ISSUES — gaps between elements that differ significantly
-7. TYPOGRAPHY — font weight, size, or case that looks visibly different
+You are comparing STRUCTURE ONLY:
+- Where elements are positioned (top-left, center, bottom-right, etc.)
+- How many text blocks / image areas exist
+- The visual hierarchy (what's big, what's small)
+- Spacing and margins between elements
+- Overall composition (split layout, full-bleed, text-dominant, etc.)
 
-DO NOT comment on:
-- Whether the design is "good" or "professional"
-- Whether it works as a social media post
-- Aesthetic preferences or suggestions for improvement
-- Anything that isn't a factual difference between the two images
+DO NOT penalize for:
+- Different text content (headlines, subtext, CTA will always differ)
+- Different colors (brand colors are intentionally different)
+- Different images (a different photo/graphic is expected)
+- Different font choices (fonts are chosen per-brand)
+- Different logo
+
+DO penalize for:
+1. WRONG LAYOUT — e.g. reference has text on the right but render has it centered
+2. MISSING STRUCTURAL ELEMENTS — e.g. reference has a subtitle area but render doesn't
+3. EXTRA STRUCTURAL ELEMENTS — e.g. render has elements not in the reference layout
+4. WRONG PROPORTIONS — e.g. image takes 30% in reference but 80% in render
+5. WRONG HIERARCHY — e.g. headline is small when it should dominate
+6. WRONG SPACING — margins or padding significantly off from reference
 
 Return ONLY valid JSON:
 {
   "similarity_pct": 0-100,
   "differences": [
     {
-      "category": "missing_element | extra_element | wrong_position | wrong_size | wrong_color | wrong_spacing | wrong_typography",
-      "what": "the specific element",
-      "in_reference": "what it looks like in the reference",
-      "in_render": "what it looks like in the render (or 'absent')",
-      "fix": "specific CSS/HTML fix instruction"
+      "category": "wrong_layout | missing_element | extra_element | wrong_proportions | wrong_hierarchy | wrong_spacing",
+      "what": "the specific structural element",
+      "in_reference": "where/how it appears in the reference LAYOUT",
+      "in_render": "where/how it appears in the render (or 'absent')",
+      "fix": "specific CSS/HTML layout fix instruction"
     }
   ],
-  "summary": "1 sentence — the single most important difference to fix"
+  "summary": "1 sentence — the single most important STRUCTURAL difference to fix"
 }
 
-If the images are very similar (similarity 85+), return an empty differences array."""
+If the LAYOUT is similar (similarity 75+), return an empty differences array.
+A render with the right layout but different content/colors = 90-100% similar."""
 
 
 async def compare_to_reference(
@@ -452,30 +459,30 @@ async def compare_to_reference(
 
 
 def needs_copy_revision(comparison: dict) -> bool:
-    """Check if a copy-mode render needs revision based on comparison."""
+    """Check if a copy-mode render needs revision based on structural comparison."""
     sim = comparison.get("similarity_pct", 0)
     diffs = comparison.get("differences", [])
 
-    # Good enough — stop
-    if sim >= 85 and not diffs:
+    # Good layout match — stop
+    if sim >= 70 and not diffs:
         return False
 
-    # Missing elements are the most important to fix
-    missing = [d for d in diffs if d.get("category") == "missing_element"]
-    if missing:
-        logger.info(f"Copy revision needed: {len(missing)} missing elements")
+    # Layout-breaking issues — must fix
+    layout_issues = [d for d in diffs if d.get("category") in ("wrong_layout", "missing_element", "wrong_proportions")]
+    if layout_issues:
+        logger.info(f"Copy revision needed: {len(layout_issues)} layout issues")
         return True
 
-    # Low similarity — fix
-    if sim < 75:
-        logger.info(f"Copy revision needed: similarity {sim}% < 75%")
+    # Low structural similarity — fix
+    if sim < 60:
+        logger.info(f"Copy revision needed: structural similarity {sim}% < 60%")
         return True
 
-    # Some differences but high similarity — acceptable
-    if sim >= 85:
+    # Acceptable structural match
+    if sim >= 70:
         return False
 
-    # Medium similarity with differences — fix
+    # Minor differences — fix if there are any
     if diffs:
         logger.info(f"Copy revision needed: {len(diffs)} differences, {sim}% similar")
         return True
